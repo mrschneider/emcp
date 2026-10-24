@@ -40,6 +40,7 @@ from .client import (
 )
 from .adapter_mcp import (
     McpLegacyAdapter,
+    McpStdioProcessAdapter,
 )
 
 __all__ = [
@@ -73,4 +74,5 @@ __all__ = [
     "EmcpClient",
     # Adapter
     "McpLegacyAdapter",
+    "McpStdioProcessAdapter",
 ]
