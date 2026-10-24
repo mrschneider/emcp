@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary & Design Rationale
 
-The **Enhanced Model Context Protocol (EMCP)** bridges Anthropic's Model Context Protocol (MCP) tool description schemas with microkernel operating-system principles derived from **Symbian OS (EKA2)**, **QNX Neutrino**, and **DARPA DTN (RFC 9171)**.
+The **Enhanced Model Context Protocol (EMCP)** bridges Anthropic's Model Context Protocol (MCP) tool description schemas with microkernel operating-system principles: capability-based security (PlatSec), synchronous rendezvous IPC, and disruption-tolerant networking (DARPA DTN RFC 9171).
 
 ### 1.1 The Ambient Authority Problem in Standard MCP
 In the standard MCP specification, tools expose JSON schemas and execute via conversational JSON-RPC 2.0 messages. The protocol treats tool invocation as an ambient capability: any actor capable of generating an LLM completion can trigger sensitive tools (filesystems, network egress, shell commands, databases).

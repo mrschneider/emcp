@@ -59,7 +59,7 @@ class ToolIdentity:
 
 class PlatSecGate:
     """
-    Symbian PlatSec capability verification gate.
+    Platform Security (PlatSec) capability verification gate.
     Enforces the invariant: (granted & required) == required.
     """
 

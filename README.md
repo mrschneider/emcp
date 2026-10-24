@@ -29,7 +29,7 @@ Standard MCP treats tool execution as conversational JSON-RPC 2.0 text over `std
 | Feature | Standard MCP (Anthropic) | EMCP (Enhanced) | Operational Impact |
 | :--- | :--- | :--- | :--- |
 | **Wire Protocol** | JSON-RPC 2.0 text over stdio/SSE | Fixed **48-byte binary header** + 4 structured slots | Microsecond transit, zero-copy socket parsing |
-| **Security Gate** | None (ambient authority) | **Symbian PlatSec 64-bit Bitmask** | Unprivileged frames denied at wire layer before LLM/tool wakes up |
+| **Security Gate** | None (ambient authority) | **Platform Security (PlatSec) 64-bit Bitmask** | Unprivileged frames denied at wire layer before LLM/tool wakes up |
 | **Cost Control** | Unbounded output | **Upfront Token Budget Escrow** | Prevents context explosion with automatic ledger rollback |
 | **Addressing** | Local `stdio` or transient `host:port` | **64-bit Cryptographic Tool-PIN** | Tools addressed by Ed25519 identity, mobile across nodes/edges |
 | **High Availability** | Single instance point-of-failure | **DDS C4I Tool QoS & Ownership** | Automatic failover to replica tool instances upon missed liveliness lease |
@@ -51,7 +51,7 @@ Standard MCP treats tool execution as conversational JSON-RPC 2.0 text over `std
 
 ## Key Architectural Pillars
 
-### 1. Platform Security Gate (Symbian PlatSec)
+### 1. Platform Security Gate (PlatSec)
 Every EMCP frame carries a 64-bit capability bitmask. Tools declare their `required_caps`. The gate validates:
 ```
 (EffectiveGranted & Required) == Required

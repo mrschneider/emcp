@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! Symbian PlatSec capability bitmask verification gate for EMCP.
+//! Platform Security (PlatSec) capability bitmask verification gate for EMCP.
 
 #[derive(Debug, Clone, Copy)]
 pub struct PlatSecGate {
