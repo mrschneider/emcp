@@ -33,6 +33,16 @@ Standard MCP treats tool execution as conversational JSON-RPC 2.0 text over `std
 
 ---
 
+## Interactive Playground
+
+- **Live Web Playground:** [mrschneider.github.io/emcp/playground](https://mrschneider.github.io/emcp/playground/) (interactive browser simulator testing PlatSec gates, budget sliders, and 48-byte hex wire framing).
+- **Terminal CLI Playground:** Run directly in your shell against a live child MCP process over stdio:
+  ```bash
+  python3 playground.py
+  ```
+
+---
+
 ## Quickstart
 
 ### 1. Creating a Secure EMCP Tool Server

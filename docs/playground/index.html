@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EMCP Playground — Kernel-Grade Tool Execution Live</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --border: #30363d;
+  --fg: #e6edf3;
+  --dim: #8b949e;
+  --acc: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --amber: #d29922;
+  --purple: #bc8cff;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 24px;
+  max-width: 1180px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+header { margin-bottom: 24px; }
+h1 { font-size: 1.6rem; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+h1 .brand { color: var(--acc); font-weight: 800; }
+.sub { color: var(--dim); font-size: 0.95rem; }
+
+.grid {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+@media (max-width: 860px) {
+  .grid { grid-template-columns: 1fr; }
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.panel h2 {
+  font-size: 1rem;
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.panel h2 span.badge {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #1f3a5f;
+  color: var(--acc);
+}
+
+.scenarios {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.btn-scenario {
+  background: #21262d;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.82rem;
+  transition: all 0.2s;
+}
+.btn-scenario:hover { border-color: var(--acc); }
+.btn-scenario.active {
+  background: #1f3a5f;
+  border-color: var(--acc);
+  color: #fff;
+  font-weight: 600;
+}
+
+.form-group { margin-bottom: 14px; }
+.form-group label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--dim);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+select, input[type="text"] {
+  width: 100%;
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+.cap-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+.cap-checkboxes label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  font-family: var(--mono);
+  color: var(--fg);
+  cursor: pointer;
+  margin: 0;
+  text-transform: none;
+}
+.range-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.range-wrap input[type="range"] { flex: 1; }
+.range-val { font-family: var(--mono); font-size: 0.85rem; color: var(--amber); width: 60px; text-align: right; }
+
+button.run-btn {
+  width: 100%;
+  background: var(--acc);
+  color: #000;
+  border: none;
+  border-radius: 6px;
+  padding: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 0.92rem;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+}
+button.run-btn:hover { filter: brightness(1.1); }
+
+.pipeline {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.step {
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  position: relative;
+  transition: all 0.3s;
+}
+.step.passed { border-color: var(--green); }
+.step.blocked { border-color: var(--red); background: rgba(248, 81, 73, 0.05); }
+.step.warned { border-color: var(--amber); background: rgba(210, 153, 34, 0.05); }
+
+.step-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.step-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.step-pill {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.pill-ok { background: #12261a; color: var(--green); border: 1px solid #238636; }
+.pill-denied { background: #3b1816; color: var(--red); border: 1px solid #da3633; }
+.pill-neutral { background: #1f3a5f; color: var(--acc); border: 1px solid #388bfd; }
+
+.hex-dump {
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--dim);
+  overflow-x: auto;
+  line-height: 1.4;
+  margin-top: 6px;
+}
+.hex-highlight { color: var(--acc); font-weight: 700; }
+.hex-magic { color: var(--purple); font-weight: 700; }
+.hex-caps { color: var(--amber); font-weight: 700; }
+
+.log-box {
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 6px;
+}
+
+footer {
+  margin-top: 30px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  color: var(--dim);
+  font-size: 0.82rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+footer a { color: var(--acc); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="brand">EMCP</span> Protocol Playground</h1>
+  <p class="sub">Interactive simulator of the <strong>Enhanced Model Context Protocol</strong>. Test how PlatSec capability gates, upfront token budget escrow, and 48-byte binary framing protect AI agents from prompt injection and context explosions.</p>
+</header>
+
+<div class="grid">
+  <!-- Left panel: Controls -->
+  <div class="panel">
+    <h2>Preset Scenarios <span class="badge">Presets</span></h2>
+    <div class="scenarios">
+      <button class="btn-scenario active" onclick="loadScenario('allowed')">
+        🟢 1. Authorized Tool Call (Pass)
+      </button>
+      <button class="btn-scenario" onclick="loadScenario('injection')">
+        🛑 2. Prompt Injection (PlatSec Blocked)
+      </button>
+      <button class="btn-scenario" onclick="loadScenario('overflow')">
+        ⚠️ 3. Context Blowup (Budget Overflow)
+      </button>
+      <button class="btn-scenario" onclick="loadScenario('custom')">
+        🛠️ 4. Custom Configuration
+      </button>
+    </div>
+
+    <h2>Caller Parameters <span class="badge">EMCP Frame</span></h2>
+    
+    <div class="form-group">
+      <label>Target Tool</label>
+      <select id="tool-select" onchange="onToolChange()">
+        <option value="sql_query">sql_query (requires CAP_DATABASE_QUERY)</option>
+        <option value="drop_db">drop_db (requires CAP_DATABASE_MUTATE)</option>
+        <option value="read_fs">read_fs (requires CAP_READ_FS)</option>
+        <option value="exec_shell">exec_shell (requires CAP_SHELL_EXEC)</option>
+        <option value="dump_telemetry">dump_telemetry (generates 8,000 tokens)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Caller Granted Capabilities</label>
+      <div class="cap-checkboxes" id="caps-boxes">
+        <label><input type="checkbox" value="1" id="cap-read-fs"> CAP_READ_FS (1 &lt;&lt; 0)</label>
+        <label><input type="checkbox" value="2" id="cap-write-fs"> CAP_WRITE_FS (1 &lt;&lt; 1)</label>
+        <label><input type="checkbox" value="4" id="cap-net-http"> CAP_NET_HTTP (1 &lt;&lt; 2)</label>
+        <label><input type="checkbox" value="16" id="cap-shell"> CAP_SHELL_EXEC (1 &lt;&lt; 4)</label>
+        <label><input type="checkbox" value="32" id="cap-db-q" checked> CAP_DATABASE_QUERY (1 &lt;&lt; 5)</label>
+        <label><input type="checkbox" value="64" id="cap-db-m"> CAP_DATABASE_MUTATE (1 &lt;&lt; 6)</label>
+        <label><input type="checkbox" value="128" id="cap-sysadmin"> CAP_SYS_ADMIN (1 &lt;&lt; 7)</label>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Token Budget Escrow Ceiling</label>
+      <div class="range-wrap">
+        <input type="range" id="budget-range" min="50" max="10000" step="50" value="1000" oninput="document.getElementById('budget-val').innerText = this.value">
+        <span class="range-val" id="budget-val">1000</span>
+      </div>
+    </div>
+
+    <button class="run-btn" onclick="executeFrame()">▶ Dispatch EMCP Frame</button>
+  </div>
+
+  <!-- Right panel: Live Execution Pipeline -->
+  <div class="panel">
+    <h2>Kernel Execution Pipeline <span class="badge" id="status-badge">READY</span></h2>
+
+    <div class="pipeline">
+      <!-- Step 1: Wire framing -->
+      <div class="step" id="step-frame">
+        <div class="step-header">
+          <span class="step-title">1. Binary Wire Framing (48-Byte Header)</span>
+          <span class="step-pill pill-neutral" id="pill-frame">ASSEMBLED</span>
+        </div>
+        <p style="font-size:0.78rem; color:var(--dim)">Network byte order serialization: Magic <code>0x454D</code> ("EM"), 64-bit Caller/Target PINs, Capability Mask, Transaction ID.</p>
+        <div class="hex-dump" id="hex-view">-- Dispatch frame to inspect binary header --</div>
+      </div>
+
+      <!-- Step 2: PlatSec capability gate -->
+      <div class="step" id="step-platsec">
+        <div class="step-header">
+          <span class="step-title">2. Symbian PlatSec Capability Gate</span>
+          <span class="step-pill" id="pill-platsec">PENDING</span>
+        </div>
+        <p style="font-size:0.78rem; color:var(--dim)">Validates: <code>(GrantedMask &amp; RequiredMask) == RequiredMask</code> before tool invocation.</p>
+        <div class="log-box" id="platsec-log">Waiting for execution...</div>
+      </div>
+
+      <!-- Step 3: Token Budget Escrow -->
+      <div class="step" id="step-budget">
+        <div class="step-header">
+          <span class="step-title">3. Upfront Token Budget Escrow</span>
+          <span class="step-pill" id="pill-budget">PENDING</span>
+        </div>
+        <p style="font-size:0.78rem; color:var(--dim)">Reserves budget capacity upfront. Meters output in-flight; commits on success or refunds on overflow.</p>
+        <div class="log-box" id="budget-log">Waiting for execution...</div>
+      </div>
+
+      <!-- Step 4: Tool Execution & Reply -->
+      <div class="step" id="step-exec">
+        <div class="step-header">
+          <span class="step-title">4. Tool Execution &amp; Response Slot</span>
+          <span class="step-pill" id="pill-exec">PENDING</span>
+        </div>
+        <div class="log-box" id="exec-log">Waiting for execution...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div>
+    <strong>EMCP (Enhanced Model Context Protocol)</strong> · <a href="https://github.com/mrschneider/emcp">GitHub Repository</a> · <a href="https://github.com/mrschneider/emcp/blob/master/ARCHITECTURE.md">Architecture Spec</a>
+  </div>
+  <div>MIT License © 2026 Architecture Team / Infrastructure Operations</div>
+</footer>
+
+<script>
+const TOOLS = {
+  sql_query: { name: "sql_query", req_caps: 32, cap_name: "CAP_DATABASE_QUERY", est_tokens: 45, output: '{"rows": [{"id": 1, "status": "active"}, {"id": 2, "status": "verified"}]}' },
+  drop_db: { name: "drop_db", req_caps: 64, cap_name: "CAP_DATABASE_MUTATE", est_tokens: 15, output: '{"status": "database dropped"}' },
+  read_fs: { name: "read_fs", req_caps: 1, cap_name: "CAP_READ_FS", est_tokens: 60, output: '{"content": "[server]\\nport=8990\\nhost=0.0.0.0"}' },
+  exec_shell: { name: "exec_shell", req_caps: 16, cap_name: "CAP_SHELL_EXEC", est_tokens: 30, output: '{"stdout": "Linux 7.0.0-34-generic x86_64\\nuptime: 45 days"}' },
+  dump_telemetry: { name: "dump_telemetry", req_caps: 0, cap_name: "CAP_NONE", est_tokens: 8000, output: '{"logs": ["ENTRY_' + 'X'.repeat(32000) + '"]}' }
+};
+
+function getGrantedMask() {
+  let mask = 0;
+  const boxes = document.querySelectorAll('#caps-boxes input[type="checkbox"]');
+  boxes.forEach(b => { if (b.checked) mask |= parseInt(b.value); });
+  return mask;
+}
+
+function setGrantedMask(mask) {
+  const boxes = document.querySelectorAll('#caps-boxes input[type="checkbox"]');
+  boxes.forEach(b => {
+    const val = parseInt(b.value);
+    b.checked = (mask & val) === val;
+  });
+}
+
+function loadScenario(type) {
+  document.querySelectorAll('.btn-scenario').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+
+  if (type === 'allowed') {
+    document.getElementById('tool-select').value = 'sql_query';
+    setGrantedMask(32); // CAP_DATABASE_QUERY
+    document.getElementById('budget-range').value = 1000;
+  } else if (type === 'injection') {
+    document.getElementById('tool-select').value = 'drop_db';
+    setGrantedMask(32); // Only query, lacks MUTATE
+    document.getElementById('budget-range').value = 1000;
+  } else if (type === 'overflow') {
+    document.getElementById('tool-select').value = 'dump_telemetry';
+    setGrantedMask(0);
+    document.getElementById('budget-range').value = 500; // 500 tokens ceiling vs 8000 generated
+  }
+  document.getElementById('budget-val').innerText = document.getElementById('budget-range').value;
+  executeFrame();
+}
+
+function onToolChange() {
+  document.querySelectorAll('.btn-scenario').forEach(b => b.classList.remove('active'));
+}
+
+function formatHex(val, bytes) {
+  return val.toString(16).toUpperCase().padStart(bytes * 2, '0');
+}
+
+function executeFrame() {
+  const toolKey = document.getElementById('tool-select').value;
+  const tool = TOOLS[toolKey];
+  const grantedMask = getGrantedMask();
+  const budgetCeiling = parseInt(document.getElementById('budget-range').value);
+
+  // 1. Assemble Header (48 bytes)
+  const callerPin = 0x8F12A9B433C011DE;
+  const toolPin = 0x70A1110022334455;
+  const txId = Math.floor(Math.random() * 1000000);
+
+  const hexLines = [
+    `<span class="hex-magic">45 4D</span> 01 01 01 01 00 00  <span style="color:var(--dim)">| Magic: EM (0x454D), Ver: 1, Msg: SEND, Op: TOOLS_CALL</span>`,
+    `8F 12 A9 B4 33 C0 11 DE  <span style="color:var(--dim)">| Caller Tool-PIN: 0x8F12A9B433C011DE</span>`,
+    `70 A1 11 00 22 33 44 55  <span style="color:var(--dim)">| Target Tool-PIN: 0x70A1110022334455</span>`,
+    `${formatHex(txId, 8).match(/../g).join(' ')}  <span style="color:var(--dim)">| Transaction ID: ${txId}</span>`,
+    `<span class="hex-caps">${formatHex(grantedMask, 8).match(/../g).join(' ')}</span>  <span style="color:var(--dim)">| Capability Bitmask: 0x${formatHex(grantedMask, 8)}</span>`,
+    `00 00 00 00 00 00 00 48  <span style="color:var(--dim)">| Status: 0 (OK), Payload Length: 72 bytes</span>`
+  ];
+  document.getElementById('hex-view').innerHTML = hexLines.join('\n');
+
+  // 2. PlatSec Gate
+  const platsecStep = document.getElementById('step-platsec');
+  const platsecPill = document.getElementById('pill-platsec');
+  const platsecLog = document.getElementById('platsec-log');
+
+  const satisfiesPlatsec = (tool.req_caps === 0) || ((grantedMask & tool.req_caps) === tool.req_caps);
+
+  if (!satisfiesPlatsec) {
+    platsecStep.className = 'step blocked';
+    platsecPill.className = 'step-pill pill-denied';
+    platsecPill.innerText = 'ACCESS DENIED';
+    platsecLog.innerHTML = `<span style="color:var(--red); font-weight:700">❌ PlatSec Violation:</span>
+Required Capability: 0x${formatHex(tool.req_caps, 8)} (${tool.cap_name})
+Granted Bitmask:     0x${formatHex(grantedMask, 8)}
+Invariant: (Granted & Required == Required) -> FAILED (Missing 0x${formatHex(tool.req_caps, 8)})
+
+<span style="color:var(--amber)">[DEFENSE ENGAGED]</span> Tool execution aborted at the wire layer.
+Process/Database was NEVER contacted. Prompt-injection defeated in 0.05ms.`;
+
+    // Fail downstream
+    document.getElementById('step-budget').className = 'step';
+    document.getElementById('pill-budget').className = 'step-pill';
+    document.getElementById('pill-budget').innerText = 'SKIPPED';
+    document.getElementById('budget-log').innerText = 'Escrow skipped: frame rejected at PlatSec gate.';
+
+    document.getElementById('step-exec').className = 'step blocked';
+    document.getElementById('pill-exec').className = 'step-pill pill-denied';
+    document.getElementById('pill-exec').innerText = 'EMCP_ERR_CAPABILITY_DENIED (3)';
+    document.getElementById('exec-log').innerText = 'Reply Status: 3 (EMCP_ERR_CAPABILITY_DENIED)\nPayload: {"error": "PlatSec access denied: frame lacks required capability"}';
+    document.getElementById('status-badge').innerText = 'BLOCKED BY PLATSEC';
+    return;
+  }
+
+  // PlatSec Passed
+  platsecStep.className = 'step passed';
+  platsecPill.className = 'step-pill pill-ok';
+  platsecPill.innerText = 'GRANTED';
+  platsecLog.innerHTML = `<span style="color:var(--green)">✓ PlatSec Verification Passed:</span>
+Tool Required: 0x${formatHex(tool.req_caps, 8)} (${tool.cap_name})
+Granted Mask:  0x${formatHex(grantedMask, 8)}
+Invariant (Granted & Required == Required) holds true. Proceeding to token escrow.`;
+
+  // 3. Token Budget Escrow
+  const budgetStep = document.getElementById('step-budget');
+  const budgetPill = document.getElementById('pill-budget');
+  const budgetLog = document.getElementById('budget-log');
+
+  const budgetOverflow = tool.est_tokens > budgetCeiling;
+
+  if (budgetOverflow) {
+    budgetStep.className = 'step blocked';
+    budgetPill.className = 'step-pill pill-denied';
+    budgetPill.innerText = 'BUDGET OVERFLOW';
+    budgetLog.innerHTML = `<span style="color:var(--red); font-weight:700">❌ Token Budget Exceeded:</span>
+Upfront Reserved Envelope: ${budgetCeiling} tokens
+Tool Output Generated:    ${tool.est_tokens} tokens
+Overdraw:                 +${tool.est_tokens - budgetCeiling} tokens
+
+<span style="color:var(--amber)">[CONTEXT SHIELD]</span> Atomic rollback executed on ledger.
+Envelope refunded in full. Context window saved from blowup.`;
+
+    document.getElementById('step-exec').className = 'step blocked';
+    document.getElementById('pill-exec').className = 'step-pill pill-denied';
+    document.getElementById('pill-exec').innerText = 'EMCP_ERR_TOKEN_OVERFLOW (7)';
+    document.getElementById('exec-log').innerText = `Reply Status: 7 (EMCP_ERR_TOKEN_OVERFLOW)\nPayload: {"error": "Tool output generated ${tool.est_tokens} tokens exceeding envelope of ${budgetCeiling}"}`;
+    document.getElementById('status-badge').innerText = 'OVERFLOW PREVENTED';
+    return;
+  }
+
+  // Budget Passed
+  const remaining = budgetCeiling - tool.est_tokens;
+  budgetStep.className = 'step passed';
+  budgetPill.className = 'step-pill pill-ok';
+  budgetPill.innerText = 'COMMITTED';
+  budgetLog.innerHTML = `<span style="color:var(--green)">✓ Escrow Settlement Successful:</span>
+Reserved Envelope: ${budgetCeiling} tokens
+Tool Consumed:     ${tool.est_tokens} tokens
+Committed:         ${tool.est_tokens} tokens
+Settled to Reply:  ${remaining} tokens remaining in cascade envelope.`;
+
+  // 4. Executed Successfully
+  const execStep = document.getElementById('step-exec');
+  const execPill = document.getElementById('pill-exec');
+  const execLog = document.getElementById('exec-log');
+
+  execStep.className = 'step passed';
+  execPill.className = 'step-pill pill-ok';
+  execPill.innerText = 'EMCP_SUCCESS (0)';
+  execLog.innerHTML = `<span style="color:var(--green)">✓ Tool Executed Successfully via Stdio/Wire:</span>
+Reply Slot 0: "tools/reply"
+Reply Slot 1: ${tool.output}
+Reply Slot 2: Constraints(remaining_budget=${remaining}, timeout=5000ms)
+Status Code:  0 (EMCP_SUCCESS)`;
+  document.getElementById('status-badge').innerText = 'TRANSACTION COMPLETED';
+}
+
+// Initial run
+window.onload = () => executeFrame();
+</script>
+</body>
+</html>
