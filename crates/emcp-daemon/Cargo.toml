@@ -1,0 +1,15 @@
+[package]
+name = "emcp-daemon"
+version = "0.1.0"
+edition = "2021"
+authors = ["Architecture Team / Infrastructure Operations"]
+description = "EMCP high-performance native relay daemon and legacy MCP stdio-to-mesh proxy"
+
+[dependencies]
+emcp-core = { path = "../emcp-core" }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde_json = "1.0"

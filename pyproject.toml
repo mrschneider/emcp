@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emcp"
+version = "0.1.0"
+description = "Enhanced Model Context Protocol (EMCP) — Kernel-grade Tool Execution and Multi-Agent Mesh Protocol"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Guilherme Schneider", email = "guilherme.barcha@gmail.com" }]
+keywords = ["mcp", "emcp", "agents", "llm", "tools", "microkernel", "security", "protocol"]
+dependencies = [
+    "cryptography>=41.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mrschneider/emcp"
+Repository = "https://github.com/mrschneider/emcp"
+
+[tool.setuptools.packages.find]
+where = ["src"]

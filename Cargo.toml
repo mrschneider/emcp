@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/emcp-core",
+    "crates/emcp-daemon",
+]
+resolver = "2"
