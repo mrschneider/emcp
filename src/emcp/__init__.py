@@ -42,6 +42,24 @@ from .adapter_mcp import (
     McpLegacyAdapter,
     McpStdioProcessAdapter,
 )
+from .qos import (
+    DurabilityKind,
+    LivelinessKind,
+    OwnershipKind,
+    QosContractEvaluator,
+    QosProfile,
+    QosViolation,
+    ReliabilityKind,
+    ToolDeadlineMonitor,
+    ToolOwnershipArbitrator,
+)
+from .dtn import (
+    CustodyRefusalReason,
+    CustodyReport,
+    CustodySignal,
+    ToolBundle,
+    ToolCustodyStore,
+)
 
 __all__ = [
     # Constants
@@ -75,4 +93,20 @@ __all__ = [
     # Adapter
     "McpLegacyAdapter",
     "McpStdioProcessAdapter",
+    # DDS C4I QoS for Tools
+    "DurabilityKind",
+    "LivelinessKind",
+    "OwnershipKind",
+    "QosContractEvaluator",
+    "QosProfile",
+    "QosViolation",
+    "ReliabilityKind",
+    "ToolDeadlineMonitor",
+    "ToolOwnershipArbitrator",
+    # DTN Custody Transfer for Tools
+    "CustodyRefusalReason",
+    "CustodyReport",
+    "CustodySignal",
+    "ToolBundle",
+    "ToolCustodyStore",
 ]

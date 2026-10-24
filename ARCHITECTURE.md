@@ -121,3 +121,19 @@ EMCP does not discard existing ecosystem tooling. The `McpLegacyAdapter`:
 - Dynamically queries `tools/list`.
 - Maps existing tools into EMCP services with assigned PlatSec capability requirements and token ceilings.
 - Allows Claude, Hermes, and OpenAI agents using EMCP to safely consume third-party MCP servers with full kernel protection.
+
+---
+
+## 7. Distributed High-Availability & Tactical Resiliency
+
+### 7.1 OMG DDS / C4I Quality of Service for Tools (`qos.py`)
+To prevent agent execution freezes and enable high-availability tool meshes:
+* **RxO Contract Evaluator (`QosContractEvaluator`):** Validates caller requirements against tool capabilities. If a caller requires a turnaround deadline of 500ms but a remote tool only guarantees 3000ms, the binding is rejected upfront.
+* **Redundant Tool Ownership & Automatic Failover (`ToolOwnershipArbitrator`):** Allows multiple instances of the same tool to be deployed across redundant farm nodes (e.g., primary tool on `.70` with strength 200, replica on `.18` with strength 100). The arbitrator tracks heartbeat liveliness leases; if the primary tool hangs or crashes, incoming calls are automatically routed to the replica tool instance without agent disruption.
+* **Turnaround Deadline Monitor (`ToolDeadlineMonitor`):** Enforces strict SLA timeouts on long-running tool executions, firing alerts and triggering out-of-band cancellation pulses (`PULSE_CANCEL`) upon breach.
+
+### 7.2 RFC 9171 / DARPA DTN Custody Transfer for Tools (`dtn.py`)
+To execute tools reliably across partitioned, wireless, or intermittent edge links:
+* **Custody Transfer Handover (`ToolCustodyStore`):** Invocations and results are encapsulated in `ToolBundle`s. Upstream nodes retain message custody until downstream explicitly acknowledges custody responsibility (`CUSTODY_ACCEPTED`).
+* **Resiliency Controls:** Bounded buffer memory accounting, duplicate suppression rings, and proactive TTL expiration pruning protect edge nodes against routing loops and memory exhaustion during extended network outages.
+

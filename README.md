@@ -28,6 +28,7 @@ Standard MCP treats tool execution as conversational JSON-RPC 2.0 text over `std
 | **Security Gate** | None (ambient authority) | **Symbian PlatSec 64-bit Bitmask** | Unprivileged frames denied at wire layer before LLM/tool wakes up |
 | **Cost Control** | Unbounded output | **Upfront Token Budget Escrow** | Prevents context explosion with automatic ledger rollback |
 | **Addressing** | Local `stdio` or transient `host:port` | **64-bit Cryptographic Tool-PIN** | Tools addressed by Ed25519 identity, mobile across nodes/edges |
+| **High Availability** | Single instance point-of-failure | **DDS C4I QoS & Exclusive Ownership** | Automatic failover to replica tool instances upon missed liveliness lease |
 | **Resiliency** | Fragile connection reset | **RFC 9171 DTN Custody Transfer** | Offline buffering with atomic custody handover (`CUSTODY_ACCEPTED`) |
 | **Deadlock Guard** | Silent hanging | **QNX Deadlock Graph Engine** | Prevents circular tool/subagent recursion (`A → B → A`) |
 
@@ -129,9 +130,13 @@ adapter = McpLegacyAdapter(
 │       ├── budget.py        # Token budget escrow ledger
 │       ├── server.py        # @emcp.tool decorator and dispatcher
 │       ├── client.py        # EmcpClient tool caller
-│       └── adapter_mcp.py   # Legacy Anthropic MCP JSON-RPC bridge
+│       ├── qos.py           # DDS C4I Tool QoS contracts & ownership failover
+│       ├── dtn.py           # RFC 9171 DTN custody transfer for remote tools
+│       └── adapter_mcp.py   # Legacy Anthropic MCP JSON-RPC & stdio bridge
 └── tests/
-    └── test_emcp.py         # Test suite covering PlatSec, budget, and framing
+    ├── test_emcp.py         # Core test suite (PlatSec, budget, framing)
+    ├── test_mcp_portability.py # End-to-end stdio subprocess portability tests
+    └── test_tactical_emcp.py # DDS QoS tool failover & DTN custody tests
 ```
 
 ---
