@@ -7,6 +7,8 @@
 
 **EMCP** (Enhanced Model Context Protocol) is a kernel-grade tool execution and multi-agent mesh protocol. While Anthropic's standard MCP standardizes *how tools are described* (via JSON Schema), EMCP standardizes *how tools are executed with strict operating-system guarantees*: cryptographic capabilities, token budget escrow, sub-millisecond zero-copy wire framing, and disruption-tolerant delivery.
 
+![EMCP Architecture — Kernel-grade Tool Execution and Multi-Agent Mesh](docs/emcp-architecture.png)
+
 ---
 
 ## Why EMCP? (The Breakdown of Standard MCP)
