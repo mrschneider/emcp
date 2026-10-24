@@ -87,7 +87,9 @@ Payload length indicates the size of the following block:
 
 Capabilities are defined as a 64-bit bitmask. A tool declaring required capabilities will only execute if:
 
-$$\text{GrantedMask} \ \& \ \text{RequiredMask} == \text{RequiredMask}$$
+```
+(GrantedMask & RequiredMask) == RequiredMask
+```
 
 | Bit | Symbol | Description |
 | :--- | :--- | :--- |

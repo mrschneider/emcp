@@ -53,7 +53,9 @@ Standard MCP treats tool execution as conversational JSON-RPC 2.0 text over `std
 
 ### 1. Platform Security Gate (Symbian PlatSec)
 Every EMCP frame carries a 64-bit capability bitmask. Tools declare their `required_caps`. The gate validates:
-$$\text{EffectiveGranted} \ \& \ \text{Required} == \text{Required}$$
+```
+(EffectiveGranted & Required) == Required
+```
 If the caller lacks the required capability bit (e.g. `CAP_DATABASE_MUTATE` on `drop_database`), execution aborts immediately at the transport layer with `EMCP_ERR_CAPABILITY_DENIED (3)`. **The underlying tool process or database is never touched.**
 
 ### 2. Upfront Token Budget Escrow (`budget.py`)
