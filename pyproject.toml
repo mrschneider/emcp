@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Enhanced Model Context Protocol (EMCP) — Kernel-grade Tool Execution and Multi-Agent Mesh Protocol"
 readme = "README.md"
 license = { text = "MIT" }
