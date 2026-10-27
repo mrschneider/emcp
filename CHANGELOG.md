@@ -25,11 +25,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-lock, no blocking `readline` on the event loop). Eight concurrent 50ms
   tool calls now complete in ~55ms against a concurrent MCP server instead
   of ~400ms serialized.
+- **`TokenBudgetLedger.commit()` drops the escrow (Rust)** — the native
+  ledger kept committed entries in `escrows` forever (one entry per tool
+  call in a long-running daemon); it now mirrors the Python ledger, and a
+  post-commit `spend()` correctly returns false.
+- **`ToolOwnershipArbitrator.heartbeat()` is O(1)** — a reverse index
+  (`pin -> tool names`) replaces the full scan of every tool's candidate
+  table on every pulse; heartbeats are the hottest path in a mesh.
+- **DTN `prune_expired()` is O(k log n)** — an `(expiry, bundle_id)`
+  min-heap (lazy deletion) replaces the full table scan per call; and
+  `admit_bundle()` now reclaims expired bundles before refusing a full
+  store, so an aged buffer accepts new traffic instead of bouncing it.
+- **`list_tools()` is cached** — the tool catalogue is built once and
+  invalidated on registration (and on external `tools` dict mutation)
+  instead of being rebuilt on every `tools/list` request.
+- **Dead Rust deps removed** — `ed25519-dalek`, `sha2`, and `serde` were
+  declared in `emcp-core` but never used (signing lives in the Python
+  layer); Cargo.lock shrank from 86 to 61 packages.
 
 ### Added
 - `ToolIdentity.verify_frame()` / `verify()` and
   `EmcpServer.register_identity()` for the opt-in signature path.
-- `tests/test_perf_critical.py` regression suite locking the four contracts.
+- `tests/test_perf_critical.py` regression suite locking the four critical
+  contracts, and `tests/test_perf_medium.py` locking the five medium fixes
+  (heartbeat reverse index, DTN prune/reclaim, list_tools cache).
+- `emcp-core::budget::tests::test_escrows_dropped_on_commit_and_refund`
+  regression test for the native ledger leak.
 
 ## [0.3.0] - 2026-10-26
 

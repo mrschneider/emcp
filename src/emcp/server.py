@@ -53,6 +53,10 @@ class EmcpServer:
         # transports, enable and register each caller with register_identity.
         self.verify_signatures = verify_signatures
         self._caller_identities: Dict[int, ToolIdentity] = {}
+        # Cached tools/list catalogue. list_tools() rebuilt the full
+        # schema dict on every request — the hottest read path in a mesh
+        # (every caller lists tools on connect and on reconnect).
+        self._tool_catalog: Optional[Dict[str, Any]] = None
 
     def register_identity(self, identity: ToolIdentity) -> None:
         """Registers a caller identity so verify_signatures can check it."""
@@ -90,6 +94,7 @@ class EmcpServer:
                 default_max_tokens=default_max_tokens,
                 is_async=inspect.iscoroutinefunction(func),
             )
+            self._tool_catalog = None  # invalidate: registration changed the catalogue
             return func
 
         return decorator
@@ -111,16 +116,27 @@ class EmcpServer:
         }
 
     def list_tools(self) -> Dict[str, Any]:
-        """Returns standard MCP-compatible tool schema catalogue."""
-        tool_list = []
-        for t in self.tools.values():
-            tool_list.append({
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": t.input_schema,
-                "requiredCapabilities": int(t.required_caps),
-            })
-        return {"tools": tool_list}
+        """Returns standard MCP-compatible tool schema catalogue (cached)."""
+        if self._tool_catalog is None:
+            self._tool_catalog = {
+                "tools": [
+                    {
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": t.input_schema,
+                        "requiredCapabilities": int(t.required_caps),
+                    }
+                    for t in self.tools.values()
+                ]
+            }
+        return self._tool_catalog
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # External mutation of the tools dict (del server.tools[x],
+        # server.tools[x] = ...) must invalidate the list_tools cache.
+        if name == "tools":
+            self.__dict__["_tool_catalog"] = None
+        super().__setattr__(name, value)
 
     async def handle_frame(self, frame: EmcpFrame) -> EmcpFrame:
         """

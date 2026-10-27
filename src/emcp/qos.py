@@ -133,6 +133,11 @@ class ToolOwnershipArbitrator:
         self._tools: Dict[str, Dict[int, ToolCandidateRegistration]] = {}
         # tool_name -> current_owner_pin
         self._active_owners: Dict[str, Optional[int]] = {}
+        # Reverse index tool_pin -> set of tool names, so heartbeat() is
+        # O(1) instead of scanning every tool's candidate table on every
+        # pulse (heartbeats are the hottest path in a mesh: one per
+        # candidate per lease window).
+        self._pin_to_tools: Dict[int, set] = {}
 
     def register_candidate(
         self,
@@ -151,20 +156,31 @@ class ToolOwnershipArbitrator:
             lease_ms=lease_ms,
             last_heartbeat=t,
         )
+        self._pin_to_tools.setdefault(tool_pin, set()).add(tool_name)
         self.evaluate_tool(tool_name, now=t)
 
     def unregister_candidate(self, tool_name: str, tool_pin: int, now: Optional[float] = None) -> None:
         t = now if now is not None else time.time()
         if tool_name in self._tools and tool_pin in self._tools[tool_name]:
             del self._tools[tool_name][tool_pin]
+            if not self._tools[tool_name]:
+                del self._tools[tool_name]
+            pins = self._pin_to_tools.get(tool_pin)
+            if pins is not None:
+                pins.discard(tool_name)
+                if not pins:
+                    del self._pin_to_tools[tool_pin]
             if self._active_owners.get(tool_name) == tool_pin:
                 self._active_owners[tool_name] = None
             self.evaluate_tool(tool_name, now=t)
 
     def heartbeat(self, tool_pin: int, now: Optional[float] = None) -> None:
         t = now if now is not None else time.time()
-        for candidates in self._tools.values():
-            if tool_pin in candidates:
+        # O(1) reverse-index lookup; the old version scanned every
+        # tool's candidate table on every pulse.
+        for tool_name in self._pin_to_tools.get(tool_pin, ()):
+            candidates = self._tools.get(tool_name)
+            if candidates and tool_pin in candidates:
                 candidates[tool_pin].last_heartbeat = t
 
     def evaluate_tool(self, tool_name: str, now: Optional[float] = None) -> Optional[int]:

@@ -7,6 +7,7 @@ resilience for agent tools operating on remote, lossy, or intermittent edge link
 from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum
+import heapq
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -82,6 +83,10 @@ class ToolCustodyStore:
         self._storage_used: int = 0
         self._seen_ids: Set[int] = set()
         self._seen_order: deque = deque()
+        # (expiry, bundle_id) min-heap for O(1) "anything expired?" checks.
+        # Entries are lazily deleted: release_custody leaves the heap alone
+        # and prune_expired skips entries whose bundle is already gone.
+        self._expiry_heap: List[Tuple[float, int]] = []
 
     @property
     def bundle_count(self) -> int:
@@ -100,6 +105,25 @@ class ToolCustodyStore:
                 # whole ring on every bundle past capacity)
                 oldest = self._seen_order.popleft()
                 self._seen_ids.discard(oldest)
+
+    def _reap_expired(self, now: float) -> bool:
+        """Pops the expiry heap and releases bundles that are gone.
+
+        Returns True if at least one bundle was released (capacity freed).
+        Heap entries are lazily deleted: entries for bundles released
+        out-of-band (custody reports, forward_bundle) are skipped here.
+        """
+        freed = False
+        while self._expiry_heap:
+            expiry, bundle_id = self._expiry_heap[0]
+            if expiry > now:
+                break
+            heapq.heappop(self._expiry_heap)
+            bundle = self._bundles.get(bundle_id)
+            if bundle is not None and bundle.is_expired(now=now):
+                self.release_custody(bundle_id)
+                freed = True
+        return freed
 
     def admit_bundle(
         self,
@@ -140,13 +164,27 @@ class ToolCustodyStore:
             len(self._bundles) >= self.max_bundles
             or (self._storage_used + bundle_size) > self.max_storage_bytes
         ):
-            return False, CustodyReport(
-                bundle_id=bundle.bundle_id,
-                signal=CustodySignal.CUSTODY_REFUSED,
-                reporter_pin=self.local_pin,
-                reason=CustodyRefusalReason.BUFFER_EXHAUSTED,
-                timestamp=t,
-            )
+            # Reclaim expired bundles before refusing: a full store that
+            # has aged bundles should accept new traffic, not bounce it.
+            if not self._reap_expired(t):
+                return False, CustodyReport(
+                    bundle_id=bundle.bundle_id,
+                    signal=CustodySignal.CUSTODY_REFUSED,
+                    reporter_pin=self.local_pin,
+                    reason=CustodyRefusalReason.BUFFER_EXHAUSTED,
+                    timestamp=t,
+                )
+            if (
+                len(self._bundles) >= self.max_bundles
+                or (self._storage_used + bundle_size) > self.max_storage_bytes
+            ):
+                return False, CustodyReport(
+                    bundle_id=bundle.bundle_id,
+                    signal=CustodySignal.CUSTODY_REFUSED,
+                    reporter_pin=self.local_pin,
+                    reason=CustodyRefusalReason.BUFFER_EXHAUSTED,
+                    timestamp=t,
+                )
 
         self._mark_seen(bundle.bundle_id)
         if bundle.custody_transfer_requested:
@@ -154,6 +192,10 @@ class ToolCustodyStore:
 
         self._bundles[bundle.bundle_id] = bundle
         self._storage_used += bundle_size
+        heapq.heappush(
+            self._expiry_heap,
+            (bundle.creation_time_s + bundle.lifetime_s, bundle.bundle_id),
+        )
 
         signal = (
             CustodySignal.CUSTODY_ACCEPTED
@@ -217,9 +259,16 @@ class ToolCustodyStore:
 
     def prune_expired(self, now: Optional[float] = None) -> List[int]:
         t = now if now is not None else time.time()
+        # Heap fast path: O(k log n) for k expired bundles (often k=0 ->
+        # O(1)) instead of scanning the whole table on every call.
         expired: List[int] = []
-        for bundle_id, bundle in list(self._bundles.items()):
-            if bundle.is_expired(now=t):
+        while self._expiry_heap:
+            expiry, bundle_id = self._expiry_heap[0]
+            if expiry > t:
+                break
+            heapq.heappop(self._expiry_heap)
+            bundle = self._bundles.get(bundle_id)
+            if bundle is not None and bundle.is_expired(now=t):
                 expired.append(bundle_id)
                 self.release_custody(bundle_id)
         return expired

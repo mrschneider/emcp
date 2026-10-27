@@ -73,29 +73,33 @@ impl TokenBudgetLedger {
 
     /// Commits transaction spend and releases unused reserved capacity.
     /// Returns the remaining unspent tokens.
+    ///
+    /// Terminal state: the escrow is dropped on commit (mirrors the Python
+    /// ledger). Keeping it grew `escrows` by one entry per tool call,
+    /// forever, in a long-running daemon; a post-commit `spend()` now
+    /// correctly returns false instead of touching a corpse.
     pub fn commit(&mut self, tx_id: u64) -> Option<u32> {
-        if let Some(entry) = self.escrows.get_mut(&tx_id) {
-            entry.committed = true;
-            let unused = if entry.reserved > entry.spent {
-                entry.reserved - entry.spent
-            } else {
-                0
-            };
-            self.allocated = self.allocated.saturating_sub(unused);
-            return Some(unused);
-        }
-        None
+        let entry = self.escrows.remove(&tx_id)?;
+        let unused = if entry.reserved > entry.spent {
+            entry.reserved - entry.spent
+        } else {
+            0
+        };
+        self.allocated = self.allocated.saturating_sub(unused);
+        Some(unused)
     }
 
     /// Refunds the entire reservation upon tool failure.
+    /// Returns false if the transaction is not in escrow.
     pub fn refund(&mut self, tx_id: u64) -> bool {
         if let Some(entry) = self.escrows.remove(&tx_id) {
             if !entry.committed && entry.reserved > 0 {
                 self.allocated = self.allocated.saturating_sub(entry.reserved);
             }
-            return true;
+            true
+        } else {
+            false
         }
-        false
     }
 }
 
@@ -127,5 +131,24 @@ mod tests {
         assert_eq!(ledger.allocated, 3800);
         assert!(ledger.refund(2));
         assert_eq!(ledger.allocated, 800);
+    }
+
+    #[test]
+    fn test_escrows_dropped_on_commit_and_refund() {
+        // Regression: commit used to keep the entry (and refund only
+        // popped), so a long-running daemon grew escrows by one entry
+        // per tool call, forever. Both terminal states must drop it.
+        let mut ledger = TokenBudgetLedger::new(10_000);
+
+        assert!(ledger.escrow(1, 2000));
+        assert!(ledger.spend(1, 500));
+        assert_eq!(ledger.commit(1), Some(1500));
+        assert!(ledger.escrows.is_empty(), "commit must drop the escrow");
+        // Post-commit spend must fail, not touch a corpse entry.
+        assert!(!ledger.spend(1, 1));
+
+        assert!(ledger.escrow(2, 3000));
+        assert!(ledger.refund(2));
+        assert!(ledger.escrows.is_empty(), "refund must drop the escrow");
     }
 }
