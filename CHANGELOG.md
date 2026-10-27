@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Signature is opt-in** (`EmcpClient(sign_frames=True)` /
+  `EmcpServer(verify_signatures=True)`) — Ed25519 signing cost ~40µs/frame
+  in-process (65% of the round-trip) and was never verified. Signing now
+  stays off on trusted in-process transports; when enabled, the server
+  verifies via `register_identity()` and fails closed with
+  `EMCP_ERR_UNKNOWN_PIN` / `EMCP_ERR_SIGNATURE_INVALID`.
+- **`pack_slots` caches its single JSON pass** — `sign_frame` + `pack` used
+  to run `json.dumps` twice on the same args; a 120KB frame dropped from
+  2280µs to ~1470µs for sign+pack.
+- **Sync tool handlers run in a worker thread** (`asyncio.to_thread`) so a
+  blocking handler no longer stalls the event loop: two concurrent 300ms
+  calls now take ~300ms instead of ~600ms. `iscoroutinefunction` is cached
+  at registration.
+- **`McpStdioProcessAdapter` pipelines JSON-RPC by id** — a dedicated reader
+  thread dispatches responses to matching request ids (no more one-request-
+  per-lock, no blocking `readline` on the event loop). Eight concurrent 50ms
+  tool calls now complete in ~55ms against a concurrent MCP server instead
+  of ~400ms serialized.
+
+### Added
+- `ToolIdentity.verify_frame()` / `verify()` and
+  `EmcpServer.register_identity()` for the opt-in signature path.
+- `tests/test_perf_critical.py` regression suite locking the four contracts.
+
 ## [0.3.0] - 2026-10-26
 
 ### Changed

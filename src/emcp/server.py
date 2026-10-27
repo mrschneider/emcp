@@ -3,6 +3,7 @@ EMCP Tool Server implementation with PlatSec enforcement and Token Budget Escrow
 """
 
 from __future__ import annotations
+import asyncio
 import inspect
 import json
 from dataclasses import dataclass, field
@@ -22,6 +23,9 @@ class ToolDefinition:
     required_caps: Capability = Capability.NONE
     input_schema: Dict[str, Any] = field(default_factory=dict)
     default_max_tokens: int = 4000
+    # Cached once at registration: inspect.iscoroutinefunction costs
+    # ~1µs and used to run on every single frame.
+    is_async: bool = False
 
 
 class EmcpServer:
@@ -36,6 +40,7 @@ class EmcpServer:
         identity: Optional[ToolIdentity] = None,
         allowed_capabilities: Capability = Capability.NONE,
         token_ledger_capacity: int = 1_000_000,
+        verify_signatures: bool = False,
     ):
         self.name = name
         self.identity = identity or ToolIdentity.generate()
@@ -43,6 +48,15 @@ class EmcpServer:
         self.gate = PlatSecGate(allowed_capabilities=allowed_capabilities, strict_mode=True)
         self.ledger = TokenBudgetLedger(capacity=token_ledger_capacity)
         self.tools: Dict[str, ToolDefinition] = {}
+        # Opt-in Ed25519 verification. Off by default: the in-process
+        # transport is trusted and signing costs ~40µs/frame. For network
+        # transports, enable and register each caller with register_identity.
+        self.verify_signatures = verify_signatures
+        self._caller_identities: Dict[int, ToolIdentity] = {}
+
+    def register_identity(self, identity: ToolIdentity) -> None:
+        """Registers a caller identity so verify_signatures can check it."""
+        self._caller_identities[identity.pin] = identity
 
     @property
     def pin(self) -> int:
@@ -74,6 +88,7 @@ class EmcpServer:
                 required_caps=required_caps,
                 input_schema=schema,
                 default_max_tokens=default_max_tokens,
+                is_async=inspect.iscoroutinefunction(func),
             )
             return func
 
@@ -130,6 +145,20 @@ class EmcpServer:
                 result_data={"error": f"Tool '{tool_name}' not found on server"},
             )
 
+        # 2.5 Signature verification (opt-in; untrusted transports)
+        if self.verify_signatures:
+            caller = self._caller_identities.get(frame.caller_pin)
+            if caller is None:
+                return frame.create_reply(
+                    status=EmcpError.EMCP_ERR_UNKNOWN_PIN,
+                    result_data={"error": f"Caller PIN 0x{frame.caller_pin:016X} not registered"},
+                )
+            if not caller.verify_frame(frame):
+                return frame.create_reply(
+                    status=EmcpError.EMCP_ERR_SIGNATURE_INVALID,
+                    result_data={"error": "Frame signature verification failed"},
+                )
+
         # 3. PlatSec Capability Verification (Fail-closed)
         if not self.gate.verify(frame.capabilities_mask, tool.required_caps):
             return frame.create_reply(
@@ -151,12 +180,15 @@ class EmcpServer:
             )
 
         # 5. Tool Execution
+        # Sync handlers run in a worker thread: a blocking handler must not
+        # stall the event loop (measured: 2x300ms calls ran serially inline,
+        # concurrently via to_thread). Async handlers are awaited directly.
         try:
             kwargs = frame.args if isinstance(frame.args, dict) else {}
-            if inspect.iscoroutinefunction(tool.handler):
+            if tool.is_async:
                 result = await tool.handler(**kwargs)
             else:
-                result = tool.handler(**kwargs)
+                result = await asyncio.to_thread(tool.handler, **kwargs)
 
             # Single JSON pass for the wire path: encode the result ONCE,
             # meter on those bytes (~4 chars/token) and stash them on the

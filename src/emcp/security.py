@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from .constants import Capability, EmcpError
-from .frame import EmcpFrame
+from .frame import CryptoEnvelope, EmcpFrame
 
 
 def compute_pin(public_bytes: bytes) -> int:
@@ -50,11 +50,48 @@ class ToolIdentity:
     def sign(self, message: bytes) -> bytes:
         return self._private_key.sign(message)
 
+    def verify(self, message: bytes, signature: bytes) -> bool:
+        try:
+            self._public_key.verify(signature, message)
+            return True
+        except Exception:
+            return False
+
     def sign_frame(self, frame: EmcpFrame) -> None:
         """Signs the frame payload and attaches signature to envelope."""
         payload_to_sign = frame.pack_slots()
         sig = self.sign(payload_to_sign)
         frame.envelope.signature = sig
+
+    def verify_frame(self, frame: EmcpFrame) -> bool:
+        """Verifies the envelope signature over the packed slots.
+
+        The signature covers the slots as packed at sign time, when slot3
+        (envelope) was still empty — so verification re-packs the same
+        fields with an empty-signature envelope.
+        """
+        sig = frame.envelope.signature
+        if not sig:
+            return False
+        unsigned = EmcpFrame(
+            magic=frame.magic,
+            version=frame.version,
+            msg_type=frame.msg_type,
+            opcode=frame.opcode,
+            flags=frame.flags,
+            caller_pin=frame.caller_pin,
+            target_pin=frame.target_pin,
+            transaction_id=frame.transaction_id,
+            capabilities_mask=frame.capabilities_mask,
+            status=frame.status,
+            verb=frame.verb,
+            args=frame.args,
+            constraints=frame.constraints,
+            envelope=CryptoEnvelope(
+                session_handle=frame.envelope.session_handle, signature=b""
+            ),
+        )
+        return self.verify(unsigned.pack_slots(), sig)
 
 
 class PlatSecGate:

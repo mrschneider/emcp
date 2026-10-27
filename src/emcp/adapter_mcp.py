@@ -74,6 +74,11 @@ class McpStdioProcessAdapter(EmcpServer):
     Spawns an actual Anthropic MCP server executable as a child OS process over stdio pipes.
     Executes the JSON-RPC 2.0 handshake, discovers tools, and wraps execution in PlatSec
     capability bitmasks and Token Budget Escrow.
+
+    Wire I/O runs off the event loop: a dedicated reader thread parses stdout
+    and dispatches responses by JSON-RPC id, so concurrent tool calls pipeline
+    in a single child process (the previous design serialized every request
+    behind one lock and blocked the loop on readline).
     """
 
     def __init__(
@@ -84,64 +89,126 @@ class McpStdioProcessAdapter(EmcpServer):
         allowed_capabilities: Capability = Capability.NONE,
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
+        timeout_ms: int = 30_000,
     ):
         super().__init__(name=name, allowed_capabilities=allowed_capabilities)
         self.command = command
         self.tool_capabilities = tool_capabilities or {}
-        self._lock = threading.Lock()
+        self.timeout_s = timeout_ms / 1000.0
+        self._write_lock = threading.Lock()
+        self._dispatch_lock = threading.Lock()
+        self._pending: Dict[int, Dict[str, Any]] = {}
         self._req_id = 0
 
-        # Launch MCP process
+        # Launch MCP process. Binary pipes + manual line framing: text mode
+        # pays encoding/line-buffering per line on the hot path.
         self.proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
             cwd=cwd,
             env=env,
         )
 
+        self._reader = threading.Thread(
+            target=self._read_loop, name=f"emcp-mcp-reader-{name}", daemon=True
+        )
+        self._reader.start()
+
         self._handshake()
         self._import_tools()
+
+    # -- JSON-RPC over stdio ---------------------------------------------
+
+    def _read_loop(self) -> None:
+        """Parses stdout and dispatches each response to its waiting thread."""
+        proc = self.proc
+        stdout = proc.stdout
+        stderr = proc.stderr
+        assert stdout is not None and stderr is not None
+        # Drain stderr so the 64KB pipe buffer can never block the child.
+        threading.Thread(
+            target=lambda: [None for _ in iter(lambda: stderr.readline(), b"")],
+            daemon=True,
+        ).start()
+        while True:
+            line = stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line.decode("utf-8"))
+            except Exception:
+                continue
+            rid = msg.get("id")
+            if rid is None:
+                continue  # server notification: nothing is awaiting it
+            with self._dispatch_lock:
+                slot = self._pending.pop(rid, None)
+            if slot is not None:
+                slot["resp"] = msg
+                slot["event"].set()
+
+        # EOF: fail every in-flight request.
+        with self._dispatch_lock:
+            slots = list(self._pending.values())
+            self._pending.clear()
+        for slot in slots:
+            slot["err"] = RuntimeError("MCP child process closed stdout unexpectedly")
+            slot["event"].set()
 
     def _next_id(self) -> int:
         self._req_id += 1
         return self._req_id
 
-    def _send_jsonrpc(self, method: str, params: Optional[Dict[str, Any]] = None, is_notification: bool = False) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            if not self.proc or self.proc.poll() is not None:
-                raise RuntimeError("MCP child process is not running")
-
-            req: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-            if not is_notification:
-                req["id"] = self._next_id()
-            if params is not None:
-                req["params"] = params
-
-            line = json.dumps(req) + "\n"
-            if not self.proc.stdin:
-                raise RuntimeError("Process stdin unavailable")
-            self.proc.stdin.write(line)
+    def _write_line(self, req: Dict[str, Any]) -> None:
+        if self.proc.poll() is not None:
+            raise RuntimeError("MCP child process is not running")
+        if not self.proc.stdin:
+            raise RuntimeError("Process stdin unavailable")
+        data = (json.dumps(req) + "\n").encode("utf-8")
+        with self._write_lock:
+            self.proc.stdin.write(data)
             self.proc.stdin.flush()
 
-            if is_notification:
-                return None
+    def _notify(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
+        req: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            req["params"] = params
+        self._write_line(req)
 
-            if not self.proc.stdout:
-                raise RuntimeError("Process stdout unavailable")
-
-            resp_line = self.proc.stdout.readline()
-            if not resp_line:
-                raise RuntimeError("MCP process closed stdout unexpectedly")
-
-            return json.loads(resp_line.strip())
+    def _request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Sends a JSON-RPC request and blocks (in a worker thread) until
+        the matching response arrives. Concurrent calls pipeline: only the
+        stdin write is serialized, never the round-trip."""
+        rid = self._next_id()
+        slot: Dict[str, Any] = {"event": threading.Event()}
+        with self._dispatch_lock:
+            self._pending[rid] = slot
+        req: Dict[str, Any] = {"jsonrpc": "2.0", "id": rid, "method": method}
+        if params is not None:
+            req["params"] = params
+        try:
+            self._write_line(req)
+        except Exception:
+            with self._dispatch_lock:
+                self._pending.pop(rid, None)
+            raise
+        if not slot["event"].wait(timeout=self.timeout_s):
+            with self._dispatch_lock:
+                self._pending.pop(rid, None)
+            if not slot["event"].is_set():
+                raise TimeoutError(f"MCP request {method} timed out after {self.timeout_s:.1f}s")
+        if "err" in slot:
+            raise slot["err"]
+        return slot["resp"]
 
     def _handshake(self) -> None:
         """Executes official Anthropic MCP protocol initialization handshake."""
-        resp = self._send_jsonrpc(
+        resp = self._request(
             "initialize",
             {
                 "protocolVersion": "2024-11-05",
@@ -152,11 +219,11 @@ class McpStdioProcessAdapter(EmcpServer):
         if not resp or "result" not in resp:
             raise RuntimeError(f"MCP handshake failed: {resp}")
 
-        self._send_jsonrpc("notifications/initialized", is_notification=True)
+        self._notify("notifications/initialized")
 
     def _import_tools(self) -> None:
         """Queries tools/list over stdio and binds each tool into EMCP."""
-        resp = self._send_jsonrpc("tools/list", {})
+        resp = self._request("tools/list", {})
         if not resp:
             return
 
@@ -169,7 +236,7 @@ class McpStdioProcessAdapter(EmcpServer):
 
             def make_handler(name: str):
                 def handler(**kwargs):
-                    call_resp = self._send_jsonrpc(
+                    call_resp = self._request(
                         "tools/call",
                         {"name": name, "arguments": kwargs},
                     )
@@ -205,3 +272,5 @@ class McpStdioProcessAdapter(EmcpServer):
                     self.proc.kill()
                 except Exception:
                     pass
+        if self._reader is not None and self._reader.is_alive():
+            self._reader.join(timeout=1.0)

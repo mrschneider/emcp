@@ -90,19 +90,27 @@ class EmcpFrame:
             object.__setattr__(self, "raw_payload", None)
         object.__setattr__(self, name, value)
 
+    def _encode_args(self) -> bytes:
+        """Single source of truth for slot1 encoding."""
+        if self.args is None:
+            return b""
+        if isinstance(self.args, bytes):
+            return self.args
+        if isinstance(self.args, (dict, list, int, float, str, bool)):
+            return json.dumps(self.args, separators=(",", ":")).encode("utf-8")
+        return str(self.args).encode("utf-8")
+
     def pack_slots(self) -> bytes:
         slot0 = self.verb.encode("utf-8") if self.verb else b""
         pre_encoded = self.__dict__.get("_args_json")
-        if pre_encoded is not None:
-            slot1 = pre_encoded
-        elif self.args is None:
-            slot1 = b""
-        elif isinstance(self.args, bytes):
-            slot1 = self.args
-        elif isinstance(self.args, (dict, list, int, float, str, bool)):
-            slot1 = json.dumps(self.args, separators=(",", ":")).encode("utf-8")
-        else:
-            slot1 = str(self.args).encode("utf-8")
+        if pre_encoded is None:
+            pre_encoded = self._encode_args()
+            # Stash so a second pass (sign_frame -> pack, unpack -> repack)
+            # never re-runs json.dumps on the same args. `args` mutation
+            # invalidates the stash via __setattr__. Bypass the hook so a
+            # parsed-wire frame keeps its raw_payload cache intact.
+            object.__setattr__(self, "_args_json", pre_encoded)
+        slot1 = pre_encoded
 
         slot2 = (self.constraints or ToolConstraints()).pack()
         slot3 = (self.envelope or CryptoEnvelope()).pack()

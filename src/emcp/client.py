@@ -6,24 +6,32 @@ from __future__ import annotations
 import itertools
 from typing import Any, Dict, Optional
 
-from .constants import Capability, EmcpError, MsgType, OpCode
+from .constants import Capability, EmcpError, FrameFlags, MsgType, OpCode
 from .frame import EmcpFrame, ToolConstraints
 from .security import ToolIdentity
 from .server import EmcpServer
 
 
 class EmcpClient:
-    """Client for calling EMCP tool servers."""
+    """Client for calling EMCP tool servers.
 
-    _tx_counter = itertools.count(1)
+    `sign_frames` is opt-in: Ed25519 signing costs ~40µs/frame in-process
+    (and is proportional to payload on the wire), so it stays off by
+    default. Enable it for untrusted / network transports, paired with a
+    server constructed with `verify_signatures=True` and a registered
+    caller identity.
+    """
 
     def __init__(
         self,
         identity: Optional[ToolIdentity] = None,
         allowed_capabilities: Capability = Capability.NONE,
+        sign_frames: bool = False,
     ):
         self.identity = identity or ToolIdentity.generate()
         self.allowed_capabilities = allowed_capabilities
+        self.sign_frames = sign_frames
+        self._tx_counter = itertools.count(1)
 
     @property
     def pin(self) -> int:
@@ -51,6 +59,7 @@ class EmcpClient:
             target_pin=server.pin,
             transaction_id=tx_id,
             capabilities_mask=int(self.allowed_capabilities),
+            flags=FrameFlags.FLAG_SIGNED if self.sign_frames else FrameFlags.FLAG_NONE,
             verb=tool_name,
             args=args or {},
             constraints=ToolConstraints(
@@ -59,7 +68,8 @@ class EmcpClient:
                 max_depth_hops=10,
             ),
         )
-        self.identity.sign_frame(frame)
+        if self.sign_frames:
+            self.identity.sign_frame(frame)
 
         reply = await server.handle_frame(frame)
         return reply

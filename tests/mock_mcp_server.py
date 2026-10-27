@@ -5,6 +5,7 @@ Mock standalone Anthropic MCP JSON-RPC stdio server for portability testing.
 
 import json
 import sys
+import time
 
 
 def handle_request(req: dict) -> dict:
@@ -55,6 +56,11 @@ def handle_request(req: dict) -> dict:
                         "description": "Returns a large payload for token budget testing",
                         "inputSchema": {"type": "object"},
                     },
+                    {
+                        "name": "slow_tool",
+                        "description": "Sleeps 50ms to exercise pipelining",
+                        "inputSchema": {"type": "object"},
+                    },
                 ]
             },
         }
@@ -62,6 +68,15 @@ def handle_request(req: dict) -> dict:
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments", {})
+
+        if name == "slow_tool":
+            # Deterministic delay to exercise pipelining (out-of-order replies)
+            time.sleep(0.05)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"content": [{"type": "text", "text": f"slow:{args.get('n', 0)}"}]},
+            }
 
         if name == "query_database":
             return {
@@ -106,21 +121,53 @@ def handle_request(req: dict) -> dict:
     }
 
 
-def main():
-    for line in sys.stdin:
+async def main():
+    import asyncio
+    import threading
+
+    loop = asyncio.get_running_loop()
+    write_lock = threading.Lock()
+    pending = set()
+    stdin = sys.stdin
+
+    def worker(req: dict):
+        try:
+            resp = handle_request(req)
+        except Exception as e:
+            sys.stderr.write(f"Error handling line: {e}\n")
+            sys.stderr.flush()
+            return
+        if resp:  # Notifications return empty dict
+            with write_lock:
+                sys.stdout.write(json.dumps(resp) + "\n")
+                sys.stdout.flush()
+
+    while True:
+        line = await loop.run_in_executor(None, stdin.readline)
+        if not line:
+            break
         line = line.strip()
         if not line:
             continue
         try:
             req = json.loads(line)
-            resp = handle_request(req)
-            if resp:  # Notifications return empty dict
-                sys.stdout.write(json.dumps(resp) + "\n")
-                sys.stdout.flush()
         except Exception as e:
             sys.stderr.write(f"Error handling line: {e}\n")
             sys.stderr.flush()
+            continue
+        # Each request runs in a worker thread so slow tools don't block
+        # the reader loop: this exercises the adapter's out-of-order,
+        # id-matched pipelining the way a real MCP server would.
+        fut = asyncio.ensure_future(
+            loop.run_in_executor(None, worker, req)
+        )
+        pending.add(fut)
+        fut.add_done_callback(pending.discard)
+
+    if pending:
+        await asyncio.gather(*pending)
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
