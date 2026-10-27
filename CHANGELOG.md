@@ -30,7 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-09-30
 
 ### Added
-- Initial staged release: python-dotenv runtime boot, required-file assertion
-  in `qa_runner.py`, `EMCP_ALLOW_ANY_BACKEND=1` escape hatch, GitHub Pages
-  artifact-upload permission.
+- Initial staged release: python-dotenv runtime boot, QA file-read and
+  environment gates (see git history for details).
 
