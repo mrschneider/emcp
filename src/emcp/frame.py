@@ -80,9 +80,22 @@ class EmcpFrame:
     envelope: CryptoEnvelope = field(default_factory=CryptoEnvelope)
     raw_payload: Optional[bytes] = None
 
+    def __setattr__(self, name: str, value: object) -> None:
+        """Mutation invalidates caches: raw_payload (parsed wire) and
+        _args_json (server single-encode stash), so a changed field is
+        re-encoded and never sent stale."""
+        if name == "args" and "_args_json" in self.__dict__:
+            object.__setattr__(self, "_args_json", None)
+        if name != "raw_payload" and self.__dict__.get("raw_payload") is not None:
+            object.__setattr__(self, "raw_payload", None)
+        object.__setattr__(self, name, value)
+
     def pack_slots(self) -> bytes:
         slot0 = self.verb.encode("utf-8") if self.verb else b""
-        if self.args is None:
+        pre_encoded = self.__dict__.get("_args_json")
+        if pre_encoded is not None:
+            slot1 = pre_encoded
+        elif self.args is None:
             slot1 = b""
         elif isinstance(self.args, bytes):
             slot1 = self.args
@@ -160,10 +173,18 @@ class EmcpFrame:
 
         l0, l1, l2, l3 = struct.unpack(">IIII", payload[:16])
         offset = 16
+        total = l0 + l1 + l2 + l3
+        if 16 + total > len(payload):
+            raise ValueError(
+                f"Slot lengths exceed payload: declared {total}, "
+                f"available {len(payload) - 16}"
+            )
 
         slot0_bytes = payload[offset : offset + l0]
         offset += l0
-        verb = slot0_bytes.decode("utf-8", errors="replace")
+        # Strict decode (EMCP spec): malformed verb bytes are a protocol
+        # error, never silently tolerated.
+        verb = slot0_bytes.decode("utf-8")
 
         slot1_bytes = payload[offset : offset + l1]
         offset += l1

@@ -4,6 +4,7 @@ EMCP Tool Server implementation with PlatSec enforcement and Token Budget Escrow
 
 from __future__ import annotations
 import inspect
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
@@ -157,9 +158,11 @@ class EmcpServer:
             else:
                 result = tool.handler(**kwargs)
 
-            # Simple token estimation: ~4 chars per token
-            result_str = str(result)
-            tokens_spent = max(1, len(result_str) // 4)
+            # Single JSON pass for the wire path: encode the result ONCE,
+            # meter on those bytes (~4 chars/token) and stash them on the
+            # reply so pack_slots reuses them instead of dumps() again.
+            result_json = json.dumps(result, separators=(",", ":")).encode("utf-8")
+            tokens_spent = max(1, len(result_json) // 4)
 
             if budget_limit > 0 and not self.ledger.spend(tx_id, tokens_spent):
                 self.ledger.refund(tx_id)
@@ -171,11 +174,13 @@ class EmcpServer:
                 )
 
             remaining = self.ledger.commit(tx_id) or 0
-            return frame.create_reply(
+            reply = frame.create_reply(
                 status=EmcpError.EMCP_SUCCESS,
                 result_data=result,
                 remaining_budget=remaining,
             )
+            reply._args_json = result_json
+            return reply
 
         except Exception as e:
             self.ledger.refund(tx_id)

@@ -4,6 +4,7 @@ Implements RFC 9171 / DARPA Bundle Protocol custody transfer and store-and-forwa
 resilience for agent tools operating on remote, lossy, or intermittent edge links.
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum
 import time
@@ -80,7 +81,7 @@ class ToolCustodyStore:
         self._bundles: Dict[int, ToolBundle] = {}
         self._storage_used: int = 0
         self._seen_ids: Set[int] = set()
-        self._seen_order: List[int] = []
+        self._seen_order: deque = deque()
 
     @property
     def bundle_count(self) -> int:
@@ -95,7 +96,9 @@ class ToolCustodyStore:
             self._seen_ids.add(bundle_id)
             self._seen_order.append(bundle_id)
             if len(self._seen_order) > self.seen_cache_size:
-                oldest = self._seen_order.pop(0)
+                # popleft: O(1) ring eviction (list.pop(0) shifted the
+                # whole ring on every bundle past capacity)
+                oldest = self._seen_order.popleft()
                 self._seen_ids.discard(oldest)
 
     def admit_bundle(

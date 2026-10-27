@@ -4,3 +4,10 @@ members = [
     "crates/emcp-daemon",
 ]
 resolver = "2"
+
+# CI ships release binaries on every tag: thin LTO crosses the
+# core -> daemon boundary; codegen-units=1 keeps the inliner on the
+# per-frame path.
+[profile.release]
+lto = "thin"
+codegen-units = 1

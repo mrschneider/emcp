@@ -49,6 +49,12 @@ class TokenBudgetLedger:
         entry.committed = True
         unused = entry.reserved - entry.spent if entry.reserved > entry.spent else 0
         self.allocated = max(0, self.allocated - unused)
+        # Terminal state: drop the escrow. commit is the end of the
+        # lifecycle (refund pops on failure) — keeping the entry grew
+        # _escrows by one EscrowEntry per tool call, forever, in a
+        # long-running server. Post-commit spend() now correctly
+        # returns False (entry gone) instead of touching a corpse.
+        self._escrows.pop(tx_id, None)
         return unused
 
     def refund(self, tx_id: int) -> bool:
