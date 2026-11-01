@@ -139,6 +139,11 @@ class TestSyncHandlerOffLoop(unittest.IsolatedAsyncioTestCase):
             return {"ok": True}
 
         client = EmcpClient()
+        # Calibrate the serial bound in this environment (shared CI runners
+        # are noisy — an absolute constant flaked by 0.9ms on macOS).
+        t0 = time.perf_counter()
+        await client.call_tool(server, "slow", {})
+        serial_unit = time.perf_counter() - t0
         t0 = time.perf_counter()
         replies = await asyncio.gather(
             client.call_tool(server, "slow", {}),
@@ -146,8 +151,9 @@ class TestSyncHandlerOffLoop(unittest.IsolatedAsyncioTestCase):
         )
         elapsed = time.perf_counter() - t0
         self.assertTrue(all(r.status == EmcpError.EMCP_SUCCESS for r in replies))
-        # Two 200ms calls overlap: well under the serialized 400ms bound.
-        self.assertLess(elapsed, 0.35)
+        # Two 200ms calls overlap: <90% of the serialized 2x bound. Broken
+        # overlap lands at ~100%; healthy overlap at ~50% even when loaded.
+        self.assertLess(elapsed, serial_unit * 2 * 0.9)
 
     async def test_async_handler_still_awaited(self):
         server = EmcpServer(name="async")
