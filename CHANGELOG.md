@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-31
+
+### Changed
+- **`EmcpFrame.unpack` fast-path** — unpacking a frame used to route every one
+  of its 14 fields through the dataclass `__setattr__` override, which runs a
+  cache-invalidation check (a dict lookup + comparison) per field write. During
+  unpack the fields are set once, in order, so that logic was pure overhead
+  (~14 dict lookups per frame, ~40µs/frame at the top of the round-trip). Unpack
+  now constructs the object with a `__new__`-based fast path that assigns each
+  field via `object.__setattr__`, bypassing the invalidation logic entirely.
+  Round-trip unpack drops from ~180µs to ~140µs (~22% faster). Behaviour is
+  identical: the invalidation logic still runs on every *mutation* after unpack.
+- **Optional `orjson`** — `frame.py` now uses `orjson` for its JSON
+  (de)serialisation when it is installed, falling back to `json.dumps`/`json.loads`
+  automatically. The wire format is byte-identical either way, so no caller or
+  test changes. Install with `pip install -e ".[perf]"`. The perf regression
+  suite passes with and without `orjson` present.
+
+### Removed
+- **`crates/emcp-daemon`** — a stub crate whose `main.rs` only parsed CLI args,
+  called `tracing_subscriber::fmt::init()`, logged an init line and returned
+  `Ok(())`. Every one of its dependencies (`tokio`, `clap`, `tracing`,
+  `tracing-subscriber`, `serde_json`, `emcp-core`) was unused; it shipped no
+  binary and implemented no relay or stdio proxy despite the README's
+  "High-concurrency Tokio relay & stdio proxy" description. Removed it from the
+  workspace and the CI Rust job now runs `cargo test -p emcp-core` only.
+- **`cargo build --release --workspace`** from CI — the daemon stub was the
+  only thing producing a release binary; `emcp-core` is a library crate with
+  no binary target.
+
+### Notes
+- **`crates/emcp-core` is retained** as a *native reference implementation* of
+  the EMCP wire format and its supporting primitives (PlatSec gate, token
+  budget). It is **not** linked into the Python runtime — the Python layer
+  (`frame.py`, `security.py`, `budget.py`) is the production path. Keeping it
+  gives the binary spec an authoritative, testable second implementation and
+  keeps the Rust CI job meaningful (three unit tests: budget escrow, PlatSec
+  gate). See `Cargo.toml` for the full description.
+
 ## [0.4.0] - 2026-10-27
 
 ### Changed

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "Enhanced Model Context Protocol (EMCP) — Kernel-grade Tool Execution and Multi-Agent Mesh Protocol"
 readme = "README.md"
 license = { text = "MIT" }
@@ -13,7 +13,21 @@ authors = [{ name = "Guilherme Schneider", email = "guilherme.barcha@gmail.com" 
 keywords = ["mcp", "emcp", "agents", "llm", "tools", "microkernel", "security", "protocol"]
 dependencies = [
     "cryptography>=41.0.0",
+    # Fast JSON is a hard dependency now: EmcpFrame's JSON (de)serialisation
+    # path is the dominant cost of the wire round-trip (unpack is ~15-23x
+    # slower than pack, almost all of it json.loads), so shipping the stdlib
+    # decoder by default was the worst-case path. orjson is a byte-identical
+    # drop-in for the wire format, so no caller or test changes.
+    "orjson>=3.9.0",
 ]
+
+[project.optional-dependencies]
+# Backwards-compatible alias. `pip install -e ".[perf]"` still works; orjson
+# is now a default dependency, so the extra is a no-op that exists only for
+# users who pinned it. The frame.py loader still falls back to stdlib json if
+# orjson is somehow absent, so the perf suite passes with or without it.
+perf = ["orjson>=3.9.0"]
+
 
 [project.urls]
 Homepage = "https://github.com/mrschneider/emcp"

@@ -34,13 +34,11 @@ jobs:
         run: python -m unittest discover tests -v
 
   rust-test:
-    name: Rust Crates (cargo test & build)
+    name: Rust Reference Crate (emcp-core)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run cargo test
-        run: cargo test --workspace
-      - name: Build release binaries
-        run: cargo build --release --workspace
+        run: cargo test -p emcp-core

@@ -227,12 +227,10 @@ Payload slots:
 ├── playground.py            # Interactive CLI playground over live stdio pipes
 ├── pyproject.toml           # Python SDK packaging
 ├── crates/
-│   ├── emcp-core/           # Rust zero-copy framing, PlatSec & token budget
+│   └── emcp-core/           # Native reference: zero-copy framing, PlatSec
+│   │       # & token budget (see Cargo.toml for the full description)
 │   │   ├── Cargo.toml
 │   │   └── src/             # frame.rs, platsec.rs, budget.rs, constants.rs
-│   └── emcp-daemon/         # High-concurrency Tokio relay & stdio proxy
-│       ├── Cargo.toml
-│       └── src/main.rs
 ├── docs/
 │   ├── emcp-architecture.png # Architecture infographic diagram
 │   ├── index.html           # GitHub Pages root redirect
@@ -267,11 +265,13 @@ Run the complete test suite locally:
 # Python unit and portability tests (13 tests)
 PYTHONPATH=src python3 -m unittest discover tests -v
 
-# Rust workspace tests (emcp-core + emcp-daemon)
-cargo test --workspace
+# Rust reference crate tests (emcp-core: budget escrow + PlatSec gate)
+cargo test -p emcp-core
 ```
 
-CI runs automatically on GitHub Actions across a **3 OS × 4 Python version** matrix (Linux, macOS, Windows on Python 3.10 to 3.13) alongside Rust workspace testing and release verification.
+CI runs automatically on GitHub Actions across a **3 OS × 4 Python version**
+matrix (Linux, macOS, Windows on Python 3.10 to 3.13) alongside Rust reference
+crate testing.
 
 ---
 

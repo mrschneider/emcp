@@ -1,13 +1,19 @@
 [workspace]
 members = [
     "crates/emcp-core",
-    "crates/emcp-daemon",
 ]
 resolver = "2"
 
-# CI ships release binaries on every tag: thin LTO crosses the
-# core -> daemon boundary; codegen-units=1 keeps the inliner on the
-# per-frame path.
+# emcp-core is a native reference implementation of the EMCP wire format and
+# its supporting primitives (PlatSec gate, token budget). It is NOT linked
+# into the Python runtime — the Python layer (frame.py, security.py,
+# budget.py) is the production path. The crate exists so the binary spec has
+# an authoritative, testable second implementation; its three unit tests
+# (budget escrow, PlatSec gate) guard the wire-format contract.
+#
+# The release profile keeps thin LTO + codegen-units=1 for a fast, single
+# binary build.
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

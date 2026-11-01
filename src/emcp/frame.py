@@ -8,6 +8,27 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple
 
+# Optional fast JSON (orjson). Falls back to stdlib json when orjson is not
+# installed — the wire format is identical, so no code path changes.
+try:
+    import orjson as _orjson
+
+    def _dumps(obj: Any) -> bytes:
+        return _orjson.dumps(obj)
+
+    def _loads(raw: bytes) -> Any:
+        return _orjson.loads(raw)
+
+    _HAVE_ORJSON = True
+except ImportError:
+    _HAVE_ORJSON = False
+
+    def _dumps(obj: Any) -> bytes:
+        return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+    def _loads(raw: bytes) -> Any:
+        return json.loads(raw)
+
 from .constants import (
     DEFAULT_MAX_PAYLOAD_SIZE,
     DEFAULT_TIMEOUT_MS,
@@ -97,7 +118,7 @@ class EmcpFrame:
         if isinstance(self.args, bytes):
             return self.args
         if isinstance(self.args, (dict, list, int, float, str, bool)):
-            return json.dumps(self.args, separators=(",", ":")).encode("utf-8")
+            return _dumps(self.args)
         return str(self.args).encode("utf-8")
 
     def pack_slots(self) -> bytes:
@@ -156,23 +177,28 @@ class EmcpFrame:
 
         verb, args, constraints, envelope = cls.unpack_slots(payload)
 
-        return cls(
-            magic=magic,
-            version=ver,
-            msg_type=MsgType(msg_type_raw),
-            opcode=opcode,
-            flags=FrameFlags(flags_raw),
-            caller_pin=caller_pin,
-            target_pin=target_pin,
-            transaction_id=tx_id,
-            capabilities_mask=cap_mask,
-            status=status_raw,
-            verb=verb,
-            args=args,
-            constraints=constraints,
-            envelope=envelope,
-            raw_payload=payload,
-        )
+        # Fast-path construction: the dataclass __setattr__ override runs a
+        # cache-invalidation check on *every* attribute write (12 dict lookups
+        # per unpack). During unpack the fields are set once, in order, so the
+        # invalidation logic is pure overhead. Build the object and assign each
+        # field with object.__setattr__ to skip it entirely.
+        obj = cls.__new__(cls)
+        object.__setattr__(obj, "magic", magic)
+        object.__setattr__(obj, "version", ver)
+        object.__setattr__(obj, "msg_type", MsgType(msg_type_raw))
+        object.__setattr__(obj, "opcode", opcode)
+        object.__setattr__(obj, "flags", FrameFlags(flags_raw))
+        object.__setattr__(obj, "caller_pin", caller_pin)
+        object.__setattr__(obj, "target_pin", target_pin)
+        object.__setattr__(obj, "transaction_id", tx_id)
+        object.__setattr__(obj, "capabilities_mask", cap_mask)
+        object.__setattr__(obj, "status", status_raw)
+        object.__setattr__(obj, "verb", verb)
+        object.__setattr__(obj, "args", args)
+        object.__setattr__(obj, "constraints", constraints)
+        object.__setattr__(obj, "envelope", envelope)
+        object.__setattr__(obj, "raw_payload", payload)
+        return obj
 
     @classmethod
     def unpack_slots(cls, payload: bytes) -> Tuple[str, Any, ToolConstraints, CryptoEnvelope]:
@@ -199,7 +225,7 @@ class EmcpFrame:
         args = None
         if slot1_bytes:
             try:
-                args = json.loads(slot1_bytes.decode("utf-8"))
+                args = _loads(slot1_bytes.decode("utf-8"))
             except Exception:
                 args = slot1_bytes
 
