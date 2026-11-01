@@ -177,6 +177,15 @@ class TestStdioAdapterPipelining(unittest.IsolatedAsyncioTestCase):
         self.adapter.close()
 
     async def test_concurrent_calls_pipeline(self):
+        # Calibrate the serial bound IN THIS ENVIRONMENT: shared CI runners
+        # (macOS esp.) are noisy, so an absolute 0.25s constant flakes. The
+        # invariant under test is relative: 8 pipelined 50ms calls must take
+        # a small fraction of the serial (8x single-call) time.
+        t0 = time.perf_counter()
+        one = await self.client.call_tool(self.adapter, "slow_tool", {"n": 99})
+        serial_unit = time.perf_counter() - t0
+        self.assertEqual(one.status, EmcpError.EMCP_SUCCESS)
+
         t0 = time.perf_counter()
         replies = await asyncio.gather(
             *[
@@ -188,8 +197,10 @@ class TestStdioAdapterPipelining(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(r.status == EmcpError.EMCP_SUCCESS for r in replies))
         for i, r in enumerate(replies):
             self.assertEqual(r.args["text"], f"slow:{i}")
-        # 8 x 50ms pipelined in one process: far below the ~400ms serial bound.
-        self.assertLess(elapsed, 0.25)
+        # Pipelined bound: 75% of the serial time for the same 8 calls.
+        # Broken pipelining lands at ~100% of serial; healthy pipelining
+        # lands well under half even on a loaded runner.
+        self.assertLess(elapsed, serial_unit * 8 * 0.75)
 
     async def test_mixed_fast_slow_out_of_order(self):
         replies = await asyncio.gather(
