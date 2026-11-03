@@ -190,22 +190,15 @@ class ToolOwnershipArbitrator:
             self._active_owners[tool_name] = None
             return None
 
-        # Filter live candidates
-        live_candidates: List[ToolCandidateRegistration] = []
-        for c in candidates.values():
-            elapsed_ms = (t - c.last_heartbeat) * 1000.0
-            if elapsed_ms <= c.lease_ms:
-                live_candidates.append(c)
-
-        if not live_candidates:
-            self._active_owners[tool_name] = None
-            return None
-
-        # Sort by strength desc, break ties by higher tool_pin
-        live_candidates.sort(key=lambda c: (c.strength, c.tool_pin), reverse=True)
-        winner = live_candidates[0].tool_pin
-        self._active_owners[tool_name] = winner
-        return winner
+        winner = max(
+            (c for c in candidates.values()
+             if (t - c.last_heartbeat) * 1000.0 <= c.lease_ms),
+            key=lambda c: (c.strength, c.tool_pin),
+            default=None,
+        )
+        owner = winner.tool_pin if winner is not None else None
+        self._active_owners[tool_name] = owner
+        return owner
 
     def get_owner(self, tool_name: str, now: Optional[float] = None) -> Optional[int]:
         return self.evaluate_tool(tool_name, now=now)

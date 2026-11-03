@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.11'",
@@ -189,10 +189,11 @@ wheels = [
 
 [[package]]
 name = "emcp"
-version = "0.4.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
+    { name = "orjson" },
 ]
 
 [package.optional-dependencies]
@@ -203,6 +204,7 @@ perf = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=41.0.0" },
+    { name = "orjson", specifier = ">=3.9.0" },
     { name = "orjson", marker = "extra == 'perf'", specifier = ">=3.9.0" },
 ]
 provides-extras = ["perf"]

@@ -7,6 +7,7 @@ resilience for agent tools operating on remote, lossy, or intermittent edge link
 from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum
+import heapq
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -82,15 +83,9 @@ class ToolCustodyStore:
         self._storage_used: int = 0
         self._seen_ids: Set[int] = set()
         self._seen_order: deque = deque()
-        # bundle_id -> expiry_ts index for O(1) "anything expired?" checks.
-        # Mirrors the old min-heap's fast path: prune_expired pops entries in
-        # expiry order (dict stays insertion-ordered, and expiry is monotonic
-        # with insertion) and removes them. Critically, release_custody pops
-        # the same key here, so the index never retains entries for bundles
-        # that were released out-of-band (custody reports, forward_bundle) --
-        # that was the leak: the old heap grew by one entry per bundle and was
-        # only ever drained by prune_expired / _reap_expired, never by release.
+        # Authoritative live entries plus a heap with bounded lazy deletion.
         self._expiry_index: Dict[int, float] = {}
+        self._expiry_heap: List[Tuple[float, int]] = []
 
     @property
     def bundle_count(self) -> int:
@@ -111,22 +106,15 @@ class ToolCustodyStore:
                 self._seen_ids.discard(oldest)
 
     def _reap_expired(self, now: float) -> bool:
-        """Pops the expiry index and releases bundles that are gone.
+        """Reclaim capacity using the same expiry ordering as periodic pruning."""
+        return bool(self.prune_expired(now=now))
 
-        Returns True if at least one bundle was released (capacity freed).
-        Index entries are lazily deleted: entries for bundles released
-        out-of-band (custody reports, forward_bundle) are removed by
-        release_custody, so they never reach this loop.
-        """
-        freed = False
-        for bundle_id, expiry in list(self._expiry_index.items()):
-            if expiry > now:
-                continue
-            bundle = self._bundles.get(bundle_id)
-            if bundle is not None and bundle.is_expired(now=now):
-                self.release_custody(bundle_id)
-                freed = True
-        return freed
+    def _compact_expiry_heap(self) -> None:
+        # Bound tombstones left by custody acknowledgements without rebuilding
+        # on every release. Amortized O(1) deletion, O(n) retained memory.
+        if len(self._expiry_heap) > 2 * len(self._expiry_index) + 64:
+            self._expiry_heap = [(expiry, bid) for bid, expiry in self._expiry_index.items()]
+            heapq.heapify(self._expiry_heap)
 
     def admit_bundle(
         self,
@@ -199,6 +187,8 @@ class ToolCustodyStore:
             bundle.creation_time_s + bundle.lifetime_s
         )
 
+        heapq.heappush(self._expiry_heap, (self._expiry_index[bundle.bundle_id], bundle.bundle_id))
+
         signal = (
             CustodySignal.CUSTODY_ACCEPTED
             if bundle.custody_transfer_requested
@@ -256,31 +246,19 @@ class ToolCustodyStore:
         bundle = self._bundles.pop(bundle_id, None)
         if bundle is not None:
             self._storage_used = max(0, self._storage_used - bundle.size_bytes())
-            # Remove the corresponding expiry entry so the index never grows
-            # unbounded when custody is released out-of-band (custody reports,
-            # forward_bundle hop-out, etc.). The old implementation left these
-            # entries in the heap to be reaped later, which leaked one entry
-            # per released bundle.
             self._expiry_index.pop(bundle_id, None)
+            self._compact_expiry_heap()
             return True
         return False
 
     def prune_expired(self, now: Optional[float] = None) -> List[int]:
         t = now if now is not None else time.time()
-        # Index fast path: O(k log n) for k expired bundles (often k=0 ->
-        # O(1)) instead of scanning the whole table on every call. The dict
-        # stays insertion-ordered and expiry is monotonic with insertion, so
-        # iterating in order is equivalent to popping a min-heap.
+        # Equality is still live, matching ToolBundle.is_expired().
         expired: List[int] = []
-        for bundle_id, expiry in list(self._expiry_index.items()):
-            if expiry > t:
-                break
-            bundle = self._bundles.get(bundle_id)
-            if bundle is not None and bundle.is_expired(now=t):
-                expired.append(bundle_id)
-                self.release_custody(bundle_id)
-            else:
-                # Stale index entry (released out-of-band): drop it here too so
-                # the index never retains dead keys.
-                self._expiry_index.pop(bundle_id, None)
+        while self._expiry_heap and self._expiry_heap[0][0] < t:
+            expiry, bundle_id = heapq.heappop(self._expiry_heap)
+            if self._expiry_index.get(bundle_id) != expiry:
+                continue
+            expired.append(bundle_id)
+            self.release_custody(bundle_id)
         return expired

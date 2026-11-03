@@ -278,3 +278,23 @@ crate testing.
 ## License
 
 MIT License. Designed and maintained by Architecture Team / Infrastructure Operations.
+
+### Adapter concurrency and result encoding
+
+`McpStdioProcessAdapter` awaits tool responses asynchronously. One reader and
+one writer thread handle pipe I/O; pending responses do not occupy the event
+loop's default executor. `max_pending_requests` (default 256, positive integer)
+bounds in-flight requests and the write queue. Calls exceeding the limit fail
+with a tool-execution error; callers can retry after capacity becomes available.
+Timeouts, cancellation, child EOF, and `close()` clear local pending requests.
+Cancellation refunds EMCP escrow but cannot stop a tool already running in the
+MCP child; that requires child-side cancellation support.
+
+Successful tool results use the frame's fast JSON encoder and cache the encoded
+bytes for transmission. Token usage is `max(1, len(encoded_bytes) // 4)`.
+The fast path emits UTF-8 directly (including Unicode) and uses orjson's finite
+number formatting, so byte lengths and budget boundaries can differ from the
+previous ASCII-escaped stdlib representation. Results outside orjson's domain
+(e.g. arbitrary-size integers or non-string JSON object keys), and results
+containing `null` (including potentially normalized non-finite numbers), retain
+the stdlib encoding for compatibility. The in-process result object is unchanged.

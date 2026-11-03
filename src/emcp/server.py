@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 
 from .budget import TokenBudgetLedger
 from .constants import Capability, EmcpError, OpCode
-from .frame import EmcpFrame
+from .frame import EmcpFrame, _dumps
 from .security import PlatSecGate, ToolIdentity
 
 
@@ -209,7 +209,17 @@ class EmcpServer:
             # Single JSON pass for the wire path: encode the result ONCE,
             # meter on those bytes (~4 chars/token) and stash them on the
             # reply so pack_slots reuses them instead of dumps() again.
-            result_json = json.dumps(result, separators=(",", ":")).encode("utf-8")
+            # Use the frame codec for UTF-8 JSON and meter the exact wire bytes.
+            # Retain stdlib support for values outside orjson's domain (e.g.
+            # arbitrary-size integers and JSON-compatible non-string keys).
+            try:
+                result_json = _dumps(result)
+                if b"null" in result_json:
+                    # orjson normalizes non-finite floats to null; preserve
+                    # historical stdlib behavior for these results.
+                    result_json = json.dumps(result, separators=(",", ":")).encode("utf-8")
+            except (TypeError, OverflowError):
+                result_json = json.dumps(result, separators=(",", ":")).encode("utf-8")
             tokens_spent = max(1, len(result_json) // 4)
 
             if budget_limit > 0 and not self.ledger.spend(tx_id, tokens_spent):
@@ -230,6 +240,9 @@ class EmcpServer:
             reply._args_json = result_json
             return reply
 
+        except asyncio.CancelledError:
+            self.ledger.refund(tx_id)
+            raise
         except Exception as e:
             self.ledger.refund(tx_id)
             return frame.create_reply(

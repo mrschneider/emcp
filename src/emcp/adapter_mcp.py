@@ -4,6 +4,8 @@ Supports in-memory dispatchers and real external OS processes over stdio (pipes)
 """
 
 from __future__ import annotations
+import asyncio
+import queue
 import json
 import subprocess
 import threading
@@ -90,8 +92,14 @@ class McpStdioProcessAdapter(EmcpServer):
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout_ms: int = 30_000,
+        max_pending_requests: int = 256,
     ):
         super().__init__(name=name, allowed_capabilities=allowed_capabilities)
+        if max_pending_requests < 1:
+            raise ValueError("max_pending_requests must be positive")
+        self.max_pending_requests = max_pending_requests
+        self._closed = False
+        self._writes = queue.Queue(maxsize=max_pending_requests)
         self.command = command
         self.tool_capabilities = tool_capabilities or {}
         self.timeout_s = timeout_ms / 1000.0
@@ -116,8 +124,15 @@ class McpStdioProcessAdapter(EmcpServer):
         )
         self._reader.start()
 
-        self._handshake()
-        self._import_tools()
+        try:
+            self._handshake()
+            self._import_tools()
+        except BaseException:
+            self.close()
+            raise
+        self._writer = threading.Thread(target=self._write_loop, daemon=True,
+                                        name=f"emcp-mcp-writer-{name}")
+        self._writer.start()
 
     # -- JSON-RPC over stdio ---------------------------------------------
 
@@ -128,10 +143,11 @@ class McpStdioProcessAdapter(EmcpServer):
         stderr = proc.stderr
         assert stdout is not None and stderr is not None
         # Drain stderr so the 64KB pipe buffer can never block the child.
-        threading.Thread(
-            target=lambda: [None for _ in iter(lambda: stderr.readline(), b"")],
-            daemon=True,
-        ).start()
+        self._stderr_reader = threading.Thread(
+            target=self._drain_stderr, daemon=True,
+            name=f"emcp-mcp-stderr-{self.name}",
+        )
+        self._stderr_reader.start()
         while True:
             line = stdout.readline()
             if not line:
@@ -143,26 +159,106 @@ class McpStdioProcessAdapter(EmcpServer):
                 msg = json.loads(line.decode("utf-8"))
             except Exception:
                 continue
+            if not isinstance(msg, dict):
+                continue
             rid = msg.get("id")
             if rid is None:
                 continue  # server notification: nothing is awaiting it
             with self._dispatch_lock:
                 slot = self._pending.pop(rid, None)
             if slot is not None:
-                slot["resp"] = msg
-                slot["event"].set()
+                self._complete(slot, response=msg)
 
-        # EOF: fail every in-flight request.
+        self._fail_pending(RuntimeError("MCP child process closed stdout unexpectedly"))
+
+    def _drain_stderr(self) -> None:
+        # Fixed-size reads bound memory even for stderr without newlines.
+        assert self.proc.stderr is not None
+        while self.proc.stderr.read(65536):
+            pass
+
+    @staticmethod
+    def _complete(slot, response=None, error=None) -> None:
+        if "future" in slot:
+            def deliver():
+                future = slot["future"]
+                if not future.done():
+                    if error is not None:
+                        future.set_exception(error)
+                    else:
+                        future.set_result(response)
+            try:
+                slot["loop"].call_soon_threadsafe(deliver)
+            except RuntimeError:
+                pass  # owning loop has already closed
+        else:
+            if error is not None:
+                slot["err"] = error
+            else:
+                slot["resp"] = response
+            slot["event"].set()
+
+    def _fail_pending(self, error) -> None:
         with self._dispatch_lock:
+            self._closed = True
             slots = list(self._pending.values())
             self._pending.clear()
         for slot in slots:
-            slot["err"] = RuntimeError("MCP child process closed stdout unexpectedly")
-            slot["event"].set()
+            self._complete(slot, error=error)
 
-    def _next_id(self) -> int:
-        self._req_id += 1
-        return self._req_id
+    def _register_request(self, slot) -> int:
+        with self._dispatch_lock:
+            if self._closed:
+                raise RuntimeError("MCP adapter is closed")
+            if len(self._pending) >= self.max_pending_requests:
+                raise RuntimeError("MCP pending request limit exceeded")
+            self._req_id += 1
+            rid = self._req_id
+            self._pending[rid] = slot
+            return rid
+
+    def _write_loop(self) -> None:
+        while not self._closed:
+            try:
+                item = self._writes.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is None:
+                return
+            rid, req = item
+            with self._dispatch_lock:
+                if rid not in self._pending:
+                    continue  # timed out or cancelled before writing
+            try:
+                self._write_line(req)
+            except Exception as error:
+                with self._dispatch_lock:
+                    slot = self._pending.pop(rid, None)
+                if slot is not None:
+                    self._complete(slot, error=error)
+
+    async def _request_async(self, method, params=None):
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        rid = self._register_request({"future": future, "loop": loop})
+        req = {"jsonrpc": "2.0", "id": rid, "method": method}
+        if params is not None:
+            req["params"] = params
+        try:
+            # A dedicated writer handles pipe backpressure; neither a pending
+            # response nor a blocked pipe occupies the shared executor.
+            try:
+                self._writes.put_nowait((rid, req))
+            except queue.Full as error:
+                raise RuntimeError("MCP write queue limit exceeded") from error
+            try:
+                return await asyncio.wait_for(future, self.timeout_s)
+            except asyncio.TimeoutError as error:
+                raise TimeoutError(f"MCP request {method} timed out after {self.timeout_s:.1f}s") from error
+        finally:
+            with self._dispatch_lock:
+                self._pending.pop(rid, None)
+            future.cancel()
 
     def _write_line(self, req: Dict[str, Any]) -> None:
         if self.proc.poll() is not None:
@@ -181,13 +277,9 @@ class McpStdioProcessAdapter(EmcpServer):
         self._write_line(req)
 
     def _request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Sends a JSON-RPC request and blocks (in a worker thread) until
-        the matching response arrives. Concurrent calls pipeline: only the
-        stdin write is serialized, never the round-trip."""
-        rid = self._next_id()
+        """Blocking startup handshake/discovery; tool calls use _request_async."""
         slot: Dict[str, Any] = {"event": threading.Event()}
-        with self._dispatch_lock:
-            self._pending[rid] = slot
+        rid = self._register_request(slot)
         req: Dict[str, Any] = {"jsonrpc": "2.0", "id": rid, "method": method}
         if params is not None:
             req["params"] = params
@@ -235,8 +327,8 @@ class McpStdioProcessAdapter(EmcpServer):
             req_caps = self.tool_capabilities.get(t_name, Capability.NONE)
 
             def make_handler(name: str):
-                def handler(**kwargs):
-                    call_resp = self._request(
+                async def handler(**kwargs):
+                    call_resp = await self._request_async(
                         "tools/call",
                         {"name": name, "arguments": kwargs},
                     )
@@ -263,6 +355,11 @@ class McpStdioProcessAdapter(EmcpServer):
 
     def close(self) -> None:
         """Terminates the underlying child process."""
+        self._fail_pending(RuntimeError("MCP adapter is closed"))
+        try:
+            self._writes.put_nowait(None)
+        except queue.Full:
+            pass
         if self.proc:
             try:
                 self.proc.terminate()
@@ -270,7 +367,21 @@ class McpStdioProcessAdapter(EmcpServer):
             except Exception:
                 try:
                     self.proc.kill()
+                    self.proc.wait(timeout=1.0)
                 except Exception:
                     pass
         if self._reader is not None and self._reader.is_alive():
             self._reader.join(timeout=1.0)
+        writer = getattr(self, "_writer", None)
+        if writer is not None and writer.is_alive():
+            writer.join(timeout=1.0)
+        stderr_reader = getattr(self, "_stderr_reader", None)
+        if stderr_reader is not None and stderr_reader.is_alive():
+            stderr_reader.join(timeout=1.0)
+        # Close each pipe only after its I/O thread exits; closing a buffered
+        # stream while another thread holds its lock can block shutdown.
+        for stream, thread in ((self.proc.stdin, writer),
+                               (self.proc.stdout, self._reader),
+                               (self.proc.stderr, stderr_reader)):
+            if stream is not None and (thread is None or not thread.is_alive()):
+                stream.close()

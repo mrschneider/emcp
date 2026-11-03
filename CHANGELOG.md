@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-02
+
+### Changed
+- MCP stdio tool calls await futures instead of holding default-executor workers.
+  A dedicated writer handles pipe backpressure; `max_pending_requests` defaults
+  to 256 and bounds in-flight requests and queued writes.
+- Tool results use the fast frame JSON encoder, with cached bytes reused by
+  reply packing. Unicode is emitted as UTF-8; token usage is calculated from
+  actual encoded bytes. Unicode and finite-number formatting can change budget
+  boundaries. Unsupported values and potentially normalized non-finite numbers
+  retain stdlib serialization compatibility.
+- Ownership arbitration selects the strongest live candidate in one pass,
+  preserving the higher-PIN tie-break without allocating and sorting a list.
+
+### Fixed
+- DTN expiry now uses an ordered heap, handling mixed lifetimes and preserving
+  the exact lifetime boundary. Empty pruning is constant-time; periodic heap
+  compaction bounds tombstones from early custody releases.
+- Child stderr is discarded in fixed-size chunks instead of retaining one list
+  entry per line for the child process lifetime.
+- MCP cancellation, timeout, EOF, write failures, and shutdown clear pending
+  requests; cancellation also refunds the server's token escrow. Shutdown stops
+  I/O threads and closes their pipes.
+
+### Validation
+- 58 Python tests pass, including 17 new resource and lifecycle regressions.
+- Local representative measurements: empty DTN pruning remains about 0.1 µs
+  from 100 to 100,000 bundles; a 123 KB result call plus reply packing improved
+  from about 748 µs to 195 µs. These are local measurements, not throughput guarantees.
+
 ## [0.5.0] - 2026-10-31
 
 ### Changed
