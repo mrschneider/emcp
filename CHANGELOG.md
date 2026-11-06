@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-05
+
+### Fixed
+- Signature verification now fails closed when a signed frame is altered.
+  The cached signed bytes are only reused while the frame still carries the
+  exact objects that were signed; any replacement of the args, constraints
+  or verb drops the cache and forces the bytes to be re-derived. The
+  reference is held by the frame, so a replacement made through
+  `object.__setattr__` (which bypasses `EmcpFrame.__setattr__`) is detected
+  as well. Previously a frame mutated after signing could still verify.
+- Verification of a frame that arrived over the wire now resolves the
+  signed bytes directly from the parsed wire payload instead of re-packing
+  the frame and re-serialising slot 1's JSON. The wire layout is sliced
+  exactly as the signer laid it out, with the slot 3 length word rewritten
+  to the session-handle-only size that was signed. Payloads that are
+  shorter than the layout, longer than the declared lengths, or without a
+  session-handle prefix are rejected and fall through to the re-pack path.
+
+### Changed
+- Ownership arbitration writes the heartbeat timestamp through a direct
+  registration index instead of re-deriving the candidate table per tool
+  per pulse, and selects the strongest live candidate in a single pass
+  without building intermediate tuples.
+
+### Performance
+Measured with `bench.py` on the development host, comparing the tagged
+release against the working tree with alternating A/B runs (medians of 9
+rounds):
+
+| Operation | v0.6.0 | v0.7.0 | Change |
+| --- | --- | --- | --- |
+| `verify_frame` (wire, unpacked) | 465.3 us | 323.7 us | **−30.4%** |
+| `sign_frame` (64 KB payload) | 571.1 us | 548.9 us | −3.9% |
+| `frame.pack` (64 KB payload) | 18.7 us | 18.9 us | +1.1% (noise) |
+| `frame.unpack` (64 KB payload) | 423.0 us | 432.6 us | +2.3% (noise) |
+
+The wire-path verification is the cross-process server path and carries the
+largest gain.
+
 ## [0.6.0] - 2026-11-02
 
 ### Changed

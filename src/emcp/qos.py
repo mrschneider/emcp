@@ -138,6 +138,13 @@ class ToolOwnershipArbitrator:
         # pulse (heartbeats are the hottest path in a mesh: one per
         # candidate per lease window).
         self._pin_to_tools: Dict[int, set] = {}
+        # Second reverse index (tool_name, tool_pin) -> registration object:
+        # heartbeat() writes the pulse timestamp through direct references
+        # instead of re-deriving the candidate table per tool per pulse.
+        # The registration object in the index is always the SAME object as
+        # in _tools (register replaces both together), so the two views can
+        # never diverge.
+        self._registrations: Dict[Tuple[str, int], ToolCandidateRegistration] = {}
 
     def register_candidate(
         self,
@@ -150,12 +157,14 @@ class ToolOwnershipArbitrator:
         t = now if now is not None else time.time()
         if tool_name not in self._tools:
             self._tools[tool_name] = {}
-        self._tools[tool_name][tool_pin] = ToolCandidateRegistration(
+        reg = ToolCandidateRegistration(
             tool_pin=tool_pin,
             strength=strength,
             lease_ms=lease_ms,
             last_heartbeat=t,
         )
+        self._tools[tool_name][tool_pin] = reg
+        self._registrations[(tool_name, tool_pin)] = reg
         self._pin_to_tools.setdefault(tool_pin, set()).add(tool_name)
         self.evaluate_tool(tool_name, now=t)
 
@@ -165,6 +174,7 @@ class ToolOwnershipArbitrator:
             del self._tools[tool_name][tool_pin]
             if not self._tools[tool_name]:
                 del self._tools[tool_name]
+            self._registrations.pop((tool_name, tool_pin), None)
             pins = self._pin_to_tools.get(tool_pin)
             if pins is not None:
                 pins.discard(tool_name)
@@ -175,13 +185,24 @@ class ToolOwnershipArbitrator:
             self.evaluate_tool(tool_name, now=t)
 
     def heartbeat(self, tool_pin: int, now: Optional[float] = None) -> None:
-        t = now if now is not None else time.time()
         # O(1) reverse-index lookup; the old version scanned every
-        # tool's candidate table on every pulse.
-        for tool_name in self._pin_to_tools.get(tool_pin, ()):
-            candidates = self._tools.get(tool_name)
-            if candidates and tool_pin in candidates:
-                candidates[tool_pin].last_heartbeat = t
+        # tool's candidate table on every pulse. The timestamp is read
+        # ONCE per pulse (not per tool) and the pulse is written through
+        # the direct registration index — no per-tool candidate-table
+        # derivation. Stale names (unregistered between set read and
+        # iteration) are cleaned up lazily.
+        t = now if now is not None else time.time()
+        tools = self._pin_to_tools.get(tool_pin)
+        if not tools:
+            return
+        for tool_name in tools:
+            reg = self._registrations.get((tool_name, tool_pin))
+            if reg is None:
+                tools.discard(tool_name)
+                if not tools:
+                    self._pin_to_tools.pop(tool_pin, None)
+            else:
+                reg.last_heartbeat = t
 
     def evaluate_tool(self, tool_name: str, now: Optional[float] = None) -> Optional[int]:
         t = now if now is not None else time.time()
@@ -190,13 +211,17 @@ class ToolOwnershipArbitrator:
             self._active_owners[tool_name] = None
             return None
 
-        winner = max(
-            (c for c in candidates.values()
-             if (t - c.last_heartbeat) * 1000.0 <= c.lease_ms),
-            key=lambda c: (c.strength, c.tool_pin),
-            default=None,
-        )
-        owner = winner.tool_pin if winner is not None else None
+        # Single pass, manual max: the old max() over a filtered generator
+        # computed each key tuple twice per candidate (filter + key lambda)
+        # and built intermediate tuples on every evaluation.
+        owner: Optional[int] = None
+        best_key: Optional[Tuple[int, int]] = None
+        for c in candidates.values():
+            if (t - c.last_heartbeat) * 1000.0 <= c.lease_ms:
+                key = (c.strength, c.tool_pin)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    owner = c.tool_pin
         self._active_owners[tool_name] = owner
         return owner
 

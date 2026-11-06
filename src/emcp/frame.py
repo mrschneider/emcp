@@ -102,13 +102,35 @@ class EmcpFrame:
     raw_payload: Optional[bytes] = None
 
     def __setattr__(self, name: str, value: object) -> None:
-        """Mutation invalidates caches: raw_payload (parsed wire) and
-        _args_json (server single-encode stash), so a changed field is
-        re-encoded and never sent stale."""
-        if name == "args" and "_args_json" in self.__dict__:
+        """Mutation invalidates caches: raw_payload (parsed wire),
+        _args_json (server single-encode stash) and the envelope's
+        _signed_bytes (signed wire bytes), so a changed field is
+        re-encoded / re-derived and never used stale.
+
+        The signed-bytes invalidation is guarded by the presence of
+        ``_signed_bytes_ref`` — the reference to the exact objects that
+        were signed, set by ``ToolIdentity.sign_frame``. The common
+        (unsigned) path pays one dict lookup; the envelope is only
+        consulted when a signature is actually cached.
+        """
+        d = self.__dict__
+        if name == "args" and "_args_json" in d:
             object.__setattr__(self, "_args_json", None)
-        if name != "raw_payload" and self.__dict__.get("raw_payload") is not None:
+        if name != "raw_payload" and d.get("raw_payload") is not None:
             object.__setattr__(self, "raw_payload", None)
+        # A changed field must invalidate the signed-bytes cache too:
+        # verify_frame must re-derive the bytes from the CURRENT fields,
+        # not from the pre-mutation wire (tamper detection stays
+        # fail-closed even for frames that arrived signed).
+        if name != "envelope" and d.get("_signed_bytes_ref") is not None:
+            # The frame holds a reference to the exact objects that were
+            # signed (see ToolIdentity.sign_frame). If a signed field is
+            # replaced, the reference no longer matches and the cached
+            # signed bytes must be dropped so verify re-derives them.
+            env = d.get("envelope")
+            if env is not None and "_signed_bytes" in env.__dict__:
+                object.__setattr__(env, "_signed_bytes", None)
+            object.__setattr__(self, "_signed_bytes_ref", None)
         object.__setattr__(self, name, value)
 
     def _encode_args(self) -> bytes:
