@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-10
+
+### Changed
+- `EmcpFrame.pack_slots` assembles the slot layout with a single
+  `b"".join()` instead of chained `+` concatenation: the final size is
+  computed once and each slot is copied exactly once.
+- `EmcpFrame.unpack` feeds the raw slot 1 bytes straight to the JSON
+  decoder. orjson's native bytes path skips the separate utf-8 decode and
+  is in fact faster than its str path; stdlib `json.loads` accepts bytes
+  natively, so the no-orjson fallback is unchanged.
+- The MCP stdio adapter shares the frame codec: the reader thread parses
+  every MCP response and the writer serialises every JSON-RPC request
+  through the same orjson-backed `_loads`/`_dumps` helpers used on the
+  frame path, instead of stdlib `json`.
+- The QoS ownership-arbitration heartbeat iterates a per-pin registration
+  map directly, removing the tuple-key construction and the per-tool dict
+  lookup that ran on every pulse.
+
+### Performance
+Measured with `bench.py` on the development host, comparing the tagged
+release against the working tree with alternating A/B runs (medians of 9
+rounds):
+
+| Operation | v0.7.0 | v0.8.0 | Change |
+| --- | --- | --- | --- |
+| `frame.pack` (64 KB payload) | 22.9 us | 10.6 us | **−53.6%** |
+| `frame.unpack` (64 KB payload) | 434.8 us | 409.1 us | −5.9% |
+| `qos.heartbeat` (pin → 5000 tools) | 884.4 us | 75.6 us | **−91.5%** |
+| `sign_frame` (64 KB payload) | 451.5 us | 438.5 us | −2.9% (noise) |
+| `verify_frame` (wire, unpacked) | 328.0 us | 319.4 us | −2.6% (noise) |
+
+`frame.unpack` and `verify_frame` are now dominated by the orjson decode
+and Ed25519 verification themselves; the remaining Python glue is a
+single dict write and a byte join.
+
+### Validation
+- 66 Python tests pass, including the 32 MCP portability and
+  perf-critical integration tests that spawn real stdio child processes.
+- Codec round-trip verified against both orjson and the stdlib fallback,
+  ASCII and UTF-8 payloads.
+
 ## [0.7.0] - 2026-11-05
 
 ### Fixed

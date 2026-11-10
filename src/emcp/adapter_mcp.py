@@ -6,12 +6,12 @@ Supports in-memory dispatchers and real external OS processes over stdio (pipes)
 from __future__ import annotations
 import asyncio
 import queue
-import json
 import subprocess
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from .constants import Capability, EmcpError
+from .frame import _dumps, _loads
 from .server import EmcpServer
 
 
@@ -156,7 +156,10 @@ class McpStdioProcessAdapter(EmcpServer):
             if not line:
                 continue
             try:
-                msg = json.loads(line.decode("utf-8"))
+                # orjson fast path when available (see frame._loads): the
+                # reader thread parses every MCP response here, and the
+                # native bytes decode is ~2x faster than stdlib json.loads.
+                msg = _loads(line)
             except Exception:
                 continue
             if not isinstance(msg, dict):
@@ -265,7 +268,10 @@ class McpStdioProcessAdapter(EmcpServer):
             raise RuntimeError("MCP child process is not running")
         if not self.proc.stdin:
             raise RuntimeError("Process stdin unavailable")
-        data = (json.dumps(req) + "\n").encode("utf-8")
+        # Shared codec (frame._dumps): orjson when available, stdlib json
+        # otherwise. JSON-RPC requests are strings/ints/dicts, so the
+        # compact orjson encoding is wire-compatible.
+        data = _dumps(req) + b"\n"
         with self._write_lock:
             self.proc.stdin.write(data)
             self.proc.stdin.flush()

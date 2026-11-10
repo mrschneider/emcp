@@ -138,13 +138,11 @@ class ToolOwnershipArbitrator:
         # pulse (heartbeats are the hottest path in a mesh: one per
         # candidate per lease window).
         self._pin_to_tools: Dict[int, set] = {}
-        # Second reverse index (tool_name, tool_pin) -> registration object:
-        # heartbeat() writes the pulse timestamp through direct references
-        # instead of re-deriving the candidate table per tool per pulse.
-        # The registration object in the index is always the SAME object as
-        # in _tools (register replaces both together), so the two views can
-        # never diverge.
-        self._registrations: Dict[Tuple[str, int], ToolCandidateRegistration] = {}
+        # Second reverse index: tool_pin -> {tool_name -> registration object}.
+        # heartbeat() iterates the per-pin values directly — no tuple key
+        # construction and no dict lookup per tool per pulse. register/unregister
+        # update both views together, so the two views can never diverge.
+        self._registrations: Dict[int, Dict[str, ToolCandidateRegistration]] = {}
 
     def register_candidate(
         self,
@@ -164,7 +162,7 @@ class ToolOwnershipArbitrator:
             last_heartbeat=t,
         )
         self._tools[tool_name][tool_pin] = reg
-        self._registrations[(tool_name, tool_pin)] = reg
+        self._registrations.setdefault(tool_pin, {})[tool_name] = reg
         self._pin_to_tools.setdefault(tool_pin, set()).add(tool_name)
         self.evaluate_tool(tool_name, now=t)
 
@@ -174,7 +172,11 @@ class ToolOwnershipArbitrator:
             del self._tools[tool_name][tool_pin]
             if not self._tools[tool_name]:
                 del self._tools[tool_name]
-            self._registrations.pop((tool_name, tool_pin), None)
+            regs = self._registrations.get(tool_pin)
+            if regs is not None:
+                regs.pop(tool_name, None)
+                if not regs:
+                    del self._registrations[tool_pin]
             pins = self._pin_to_tools.get(tool_pin)
             if pins is not None:
                 pins.discard(tool_name)
@@ -188,21 +190,14 @@ class ToolOwnershipArbitrator:
         # O(1) reverse-index lookup; the old version scanned every
         # tool's candidate table on every pulse. The timestamp is read
         # ONCE per pulse (not per tool) and the pulse is written through
-        # the direct registration index — no per-tool candidate-table
-        # derivation. Stale names (unregistered between set read and
-        # iteration) are cleaned up lazily.
+        # the direct per-pin registration map — a plain values() loop
+        # with no tuple-key construction and no dict lookup per tool.
         t = now if now is not None else time.time()
-        tools = self._pin_to_tools.get(tool_pin)
-        if not tools:
+        regs = self._registrations.get(tool_pin)
+        if not regs:
             return
-        for tool_name in tools:
-            reg = self._registrations.get((tool_name, tool_pin))
-            if reg is None:
-                tools.discard(tool_name)
-                if not tools:
-                    self._pin_to_tools.pop(tool_pin, None)
-            else:
-                reg.last_heartbeat = t
+        for reg in regs.values():
+            reg.last_heartbeat = t
 
     def evaluate_tool(self, tool_name: str, now: Optional[float] = None) -> Optional[int]:
         t = now if now is not None else time.time()
