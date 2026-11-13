@@ -7,7 +7,7 @@ import itertools
 from typing import Any, Dict, Optional
 
 from .constants import Capability, EmcpError, FrameFlags, MsgType, OpCode
-from .frame import EmcpFrame, ToolConstraints
+from .frame import CryptoEnvelope, EmcpFrame, ToolConstraints
 from .security import ToolIdentity
 from .server import EmcpServer
 
@@ -52,22 +52,29 @@ class EmcpClient:
         """Invokes a tool on an EmcpServer synchronously."""
         tx_id = next(self._tx_counter)
 
-        frame = EmcpFrame(
-            msg_type=MsgType.MSG_SEND,
-            opcode=OpCode.OP_TOOLS_CALL,
-            caller_pin=self.identity.pin,
-            target_pin=server.pin,
-            transaction_id=tx_id,
-            capabilities_mask=int(self.allowed_capabilities),
-            flags=FrameFlags.FLAG_SIGNED if self.sign_frames else FrameFlags.FLAG_NONE,
-            verb=tool_name,
-            args=args or {},
-            constraints=ToolConstraints(
-                token_budget=token_budget,
-                timeout_ms=timeout_ms,
-                max_depth_hops=10,
-            ),
-        )
+        # Inline construction (same pattern as EmcpFrame.unpack):
+        # skips the __setattr__ cache-invalidation hook on every field
+        # write.  A brand-new frame has no caches to invalidate.
+        frame = EmcpFrame.__new__(EmcpFrame)
+        object.__setattr__(frame, "magic", EmcpFrame.magic)
+        object.__setattr__(frame, "version", EmcpFrame.version)
+        object.__setattr__(frame, "msg_type", MsgType.MSG_SEND)
+        object.__setattr__(frame, "opcode", OpCode.OP_TOOLS_CALL)
+        object.__setattr__(frame, "flags", FrameFlags.FLAG_SIGNED if self.sign_frames else FrameFlags.FLAG_NONE)
+        object.__setattr__(frame, "caller_pin", self.identity.pin)
+        object.__setattr__(frame, "target_pin", server.pin)
+        object.__setattr__(frame, "transaction_id", tx_id)
+        object.__setattr__(frame, "capabilities_mask", int(self.allowed_capabilities))
+        object.__setattr__(frame, "status", EmcpError.EMCP_SUCCESS)
+        object.__setattr__(frame, "verb", tool_name)
+        object.__setattr__(frame, "args", args or {})
+        object.__setattr__(frame, "constraints", ToolConstraints(
+            token_budget=token_budget,
+            timeout_ms=timeout_ms,
+            max_depth_hops=10,
+        ))
+        object.__setattr__(frame, "envelope", CryptoEnvelope())
+        object.__setattr__(frame, "raw_payload", None)
         if self.sign_frames:
             self.identity.sign_frame(frame)
 
@@ -77,14 +84,21 @@ class EmcpClient:
     async def list_tools(self, server: EmcpServer) -> Dict[str, Any]:
         """Queries the server's registered tools."""
         tx_id = next(self._tx_counter)
-        frame = EmcpFrame(
-            msg_type=MsgType.MSG_SEND,
-            opcode=OpCode.OP_TOOLS_LIST,
-            caller_pin=self.identity.pin,
-            target_pin=server.pin,
-            transaction_id=tx_id,
-            capabilities_mask=int(self.allowed_capabilities),
-            verb="tools/list",
-        )
+        frame = EmcpFrame.__new__(EmcpFrame)
+        object.__setattr__(frame, "magic", EmcpFrame.magic)
+        object.__setattr__(frame, "version", EmcpFrame.version)
+        object.__setattr__(frame, "msg_type", MsgType.MSG_SEND)
+        object.__setattr__(frame, "opcode", OpCode.OP_TOOLS_LIST)
+        object.__setattr__(frame, "flags", FrameFlags.FLAG_NONE)
+        object.__setattr__(frame, "caller_pin", self.identity.pin)
+        object.__setattr__(frame, "target_pin", server.pin)
+        object.__setattr__(frame, "transaction_id", tx_id)
+        object.__setattr__(frame, "capabilities_mask", int(self.allowed_capabilities))
+        object.__setattr__(frame, "status", EmcpError.EMCP_SUCCESS)
+        object.__setattr__(frame, "verb", "tools/list")
+        object.__setattr__(frame, "args", None)
+        object.__setattr__(frame, "constraints", ToolConstraints())
+        object.__setattr__(frame, "envelope", CryptoEnvelope())
+        object.__setattr__(frame, "raw_payload", None)
         reply = await server.handle_frame(frame)
         return reply.args or {}

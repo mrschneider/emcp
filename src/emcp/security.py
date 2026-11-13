@@ -192,24 +192,27 @@ class ToolIdentity:
                 return self.verify(cached, sig)
         unsigned_bytes = _signed_slots_from_raw_payload(frame.raw_payload)
         if unsigned_bytes is None:
-            unsigned = EmcpFrame(
-                magic=frame.magic,
-                version=frame.version,
-                msg_type=frame.msg_type,
-                opcode=frame.opcode,
-                flags=frame.flags,
-                caller_pin=frame.caller_pin,
-                target_pin=frame.target_pin,
-                transaction_id=frame.transaction_id,
-                capabilities_mask=frame.capabilities_mask,
-                status=frame.status,
-                verb=frame.verb,
-                args=frame.args,
-                constraints=frame.constraints,
-                envelope=CryptoEnvelope(
-                    session_handle=frame.envelope.session_handle, signature=b""
-                ),
-            )
+            # Inline construction (same pattern as EmcpFrame.unpack):
+            # skips the __setattr__ cache-invalidation hook on every field
+            # write.  A brand-new frame has no caches to invalidate.
+            unsigned = EmcpFrame.__new__(EmcpFrame)
+            object.__setattr__(unsigned, "magic", frame.magic)
+            object.__setattr__(unsigned, "version", frame.version)
+            object.__setattr__(unsigned, "msg_type", frame.msg_type)
+            object.__setattr__(unsigned, "opcode", frame.opcode)
+            object.__setattr__(unsigned, "flags", frame.flags)
+            object.__setattr__(unsigned, "caller_pin", frame.caller_pin)
+            object.__setattr__(unsigned, "target_pin", frame.target_pin)
+            object.__setattr__(unsigned, "transaction_id", frame.transaction_id)
+            object.__setattr__(unsigned, "capabilities_mask", frame.capabilities_mask)
+            object.__setattr__(unsigned, "status", frame.status)
+            object.__setattr__(unsigned, "verb", frame.verb)
+            object.__setattr__(unsigned, "args", frame.args)
+            object.__setattr__(unsigned, "constraints", frame.constraints)
+            object.__setattr__(unsigned, "envelope", CryptoEnvelope(
+                session_handle=frame.envelope.session_handle, signature=b""
+            ))
+            object.__setattr__(unsigned, "raw_payload", None)
             unsigned_bytes = unsigned.pack_slots()
         return self.verify(unsigned_bytes, sig)
 

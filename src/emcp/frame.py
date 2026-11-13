@@ -279,18 +279,24 @@ class EmcpFrame:
             timeout_ms=self.constraints.timeout_ms,
             max_depth_hops=max(0, self.constraints.max_depth_hops - 1),
         )
-        return EmcpFrame(
-            magic=self.magic,
-            version=self.version,
-            msg_type=MsgType.MSG_REPLY,
-            opcode=self.opcode,
-            flags=FrameFlags.FLAG_NONE,
-            caller_pin=RELAY_PIN,
-            target_pin=self.caller_pin,
-            transaction_id=self.transaction_id,
-            capabilities_mask=self.capabilities_mask,
-            status=status,
-            verb="tools/reply",
-            args=result_data,
-            constraints=reply_constraints,
-        )
+        # Fast-path construction (same pattern as EmcpFrame.unpack):
+        # skip the __setattr__ cache-invalidation hook on every field
+        # write.  A brand-new reply has no caches to invalidate, so the
+        # hook is pure overhead (~2 µs for 12+ dict lookups).
+        obj = EmcpFrame.__new__(EmcpFrame)
+        object.__setattr__(obj, "magic", self.magic)
+        object.__setattr__(obj, "version", self.version)
+        object.__setattr__(obj, "msg_type", MsgType.MSG_REPLY)
+        object.__setattr__(obj, "opcode", self.opcode)
+        object.__setattr__(obj, "flags", FrameFlags.FLAG_NONE)
+        object.__setattr__(obj, "caller_pin", RELAY_PIN)
+        object.__setattr__(obj, "target_pin", self.caller_pin)
+        object.__setattr__(obj, "transaction_id", self.transaction_id)
+        object.__setattr__(obj, "capabilities_mask", self.capabilities_mask)
+        object.__setattr__(obj, "status", status)
+        object.__setattr__(obj, "verb", "tools/reply")
+        object.__setattr__(obj, "args", result_data)
+        object.__setattr__(obj, "constraints", reply_constraints)
+        object.__setattr__(obj, "envelope", CryptoEnvelope())
+        object.__setattr__(obj, "raw_payload", None)
+        return obj
