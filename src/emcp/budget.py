@@ -19,6 +19,8 @@ class TokenBudgetLedger:
         self._escrows: Dict[int, EscrowEntry] = {}
 
     def escrow(self, tx_id: int, amount: int) -> bool:
+        if tx_id in self._escrows or amount < 0:
+            return False
         if amount == 0:
             self._escrows[tx_id] = EscrowEntry(reserved=0)
             return True
@@ -48,7 +50,9 @@ class TokenBudgetLedger:
 
         entry.committed = True
         unused = entry.reserved - entry.spent if entry.reserved > entry.spent else 0
-        self.allocated = max(0, self.allocated - unused)
+        # Release the entire reservation on commit; consumption is recorded
+        # separately by the caller, not retained as an active reservation.
+        self.allocated = max(0, self.allocated - entry.reserved)
         # Terminal state: drop the escrow. commit is the end of the
         # lifecycle (refund pops on failure) — keeping the entry grew
         # _escrows by one EscrowEntry per tool call, forever, in a
