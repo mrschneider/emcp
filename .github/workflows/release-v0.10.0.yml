@@ -1,5 +1,12 @@
 name: Publish EMCP v0.10.0
 
+# v0.10.0 is re-tagged from the commit that carries the capability-policy
+# and escrow fixes. The first push of this tag pointed at c892faf — the
+# commit BEFORE those fixes — so this job's guardrail ("the tag already
+# exists; refusing to move it") stopped the publish and left the release
+# uncreated. The tag is now created from the fixed commit, and the
+# guardrail stays as it is: an existing tag is never moved silently.
+
 on:
   push:
     branches: [master]
