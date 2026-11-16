@@ -41,6 +41,40 @@ class EmcpClient:
     def pin_hex(self) -> str:
         return self.identity.pin_hex
 
+    def _build_request_frame(
+        self,
+        server: EmcpServer,
+        opcode: int,
+        verb: str,
+        args: Any,
+        constraints: ToolConstraints,
+        flags: FrameFlags,
+    ) -> EmcpFrame:
+        """Shared inline construction for outgoing request frames.
+
+        Skips the __setattr__ cache-invalidation hook on every field write
+        (same pattern as EmcpFrame.unpack): a brand-new frame has no caches
+        to invalidate, so the hook would be pure overhead (~2 µs for 12+
+        dict lookups).
+        """
+        frame = EmcpFrame.__new__(EmcpFrame)
+        object.__setattr__(frame, "magic", EmcpFrame.magic)
+        object.__setattr__(frame, "version", EmcpFrame.version)
+        object.__setattr__(frame, "msg_type", MsgType.MSG_SEND)
+        object.__setattr__(frame, "opcode", opcode)
+        object.__setattr__(frame, "flags", flags)
+        object.__setattr__(frame, "caller_pin", self.identity.pin)
+        object.__setattr__(frame, "target_pin", server.pin)
+        object.__setattr__(frame, "transaction_id", self._tx_counter.__next__())
+        object.__setattr__(frame, "capabilities_mask", int(self.allowed_capabilities))
+        object.__setattr__(frame, "status", EmcpError.EMCP_SUCCESS)
+        object.__setattr__(frame, "verb", verb)
+        object.__setattr__(frame, "args", args)
+        object.__setattr__(frame, "constraints", constraints)
+        object.__setattr__(frame, "envelope", CryptoEnvelope())
+        object.__setattr__(frame, "raw_payload", None)
+        return frame
+
     async def call_tool(
         self,
         server: EmcpServer,
@@ -50,31 +84,18 @@ class EmcpClient:
         timeout_ms: int = 5000,
     ) -> EmcpFrame:
         """Invokes a tool on an EmcpServer synchronously."""
-        tx_id = next(self._tx_counter)
-
-        # Inline construction (same pattern as EmcpFrame.unpack):
-        # skips the __setattr__ cache-invalidation hook on every field
-        # write.  A brand-new frame has no caches to invalidate.
-        frame = EmcpFrame.__new__(EmcpFrame)
-        object.__setattr__(frame, "magic", EmcpFrame.magic)
-        object.__setattr__(frame, "version", EmcpFrame.version)
-        object.__setattr__(frame, "msg_type", MsgType.MSG_SEND)
-        object.__setattr__(frame, "opcode", OpCode.OP_TOOLS_CALL)
-        object.__setattr__(frame, "flags", FrameFlags.FLAG_SIGNED if self.sign_frames else FrameFlags.FLAG_NONE)
-        object.__setattr__(frame, "caller_pin", self.identity.pin)
-        object.__setattr__(frame, "target_pin", server.pin)
-        object.__setattr__(frame, "transaction_id", tx_id)
-        object.__setattr__(frame, "capabilities_mask", int(self.allowed_capabilities))
-        object.__setattr__(frame, "status", EmcpError.EMCP_SUCCESS)
-        object.__setattr__(frame, "verb", tool_name)
-        object.__setattr__(frame, "args", args or {})
-        object.__setattr__(frame, "constraints", ToolConstraints(
-            token_budget=token_budget,
-            timeout_ms=timeout_ms,
-            max_depth_hops=10,
-        ))
-        object.__setattr__(frame, "envelope", CryptoEnvelope())
-        object.__setattr__(frame, "raw_payload", None)
+        frame = self._build_request_frame(
+            server,
+            OpCode.OP_TOOLS_CALL,
+            tool_name,
+            args or {},
+            ToolConstraints(
+                token_budget=token_budget,
+                timeout_ms=timeout_ms,
+                max_depth_hops=10,
+            ),
+            FrameFlags.FLAG_SIGNED if self.sign_frames else FrameFlags.FLAG_NONE,
+        )
         if self.sign_frames:
             self.identity.sign_frame(frame)
 
@@ -83,22 +104,13 @@ class EmcpClient:
 
     async def list_tools(self, server: EmcpServer) -> Dict[str, Any]:
         """Queries the server's registered tools."""
-        tx_id = next(self._tx_counter)
-        frame = EmcpFrame.__new__(EmcpFrame)
-        object.__setattr__(frame, "magic", EmcpFrame.magic)
-        object.__setattr__(frame, "version", EmcpFrame.version)
-        object.__setattr__(frame, "msg_type", MsgType.MSG_SEND)
-        object.__setattr__(frame, "opcode", OpCode.OP_TOOLS_LIST)
-        object.__setattr__(frame, "flags", FrameFlags.FLAG_NONE)
-        object.__setattr__(frame, "caller_pin", self.identity.pin)
-        object.__setattr__(frame, "target_pin", server.pin)
-        object.__setattr__(frame, "transaction_id", tx_id)
-        object.__setattr__(frame, "capabilities_mask", int(self.allowed_capabilities))
-        object.__setattr__(frame, "status", EmcpError.EMCP_SUCCESS)
-        object.__setattr__(frame, "verb", "tools/list")
-        object.__setattr__(frame, "args", None)
-        object.__setattr__(frame, "constraints", ToolConstraints())
-        object.__setattr__(frame, "envelope", CryptoEnvelope())
-        object.__setattr__(frame, "raw_payload", None)
+        frame = self._build_request_frame(
+            server,
+            OpCode.OP_TOOLS_LIST,
+            "tools/list",
+            None,
+            ToolConstraints(),
+            FrameFlags.FLAG_NONE,
+        )
         reply = await server.handle_frame(frame)
         return reply.args or {}

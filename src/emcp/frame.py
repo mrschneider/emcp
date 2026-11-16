@@ -81,6 +81,11 @@ class CryptoEnvelope:
         return cls(session_handle=session_handle, signature=sig)
 
 
+# Reply frames always carry an empty envelope (the reply is not itself
+# signed in-process), so reuse one instance instead of allocating per reply.
+_EMPTY_ENVELOPE = CryptoEnvelope()
+
+
 @dataclass
 class EmcpFrame:
     magic: bytes = EMCP_MAGIC
@@ -274,16 +279,32 @@ class EmcpFrame:
         result_data: Any = None,
         remaining_budget: int = 0,
     ) -> EmcpFrame:
-        reply_constraints = ToolConstraints(
-            token_budget=remaining_budget,
-            timeout_ms=self.constraints.timeout_ms,
-            max_depth_hops=max(0, self.constraints.max_depth_hops - 1),
-        )
+        # Reply constraints depend on the request's timeout and hops (both
+        # request-invariant); rebuild them once per request and reuse. A fresh
+        # ToolConstraints per reply was the single largest allocation on the
+        # reply path. remaining_budget is a one-shot value, so only cache when
+        # the caller did not ask for a specific remainder (otherwise a later
+        # reply with a different remaining_budget would be served stale).
+        if remaining_budget == 0:
+            rc = self.__dict__.get("_reply_constraints")
+            if rc is None:
+                rc = ToolConstraints(
+                    token_budget=0,
+                    timeout_ms=self.constraints.timeout_ms,
+                    max_depth_hops=max(0, self.constraints.max_depth_hops - 1),
+                )
+                self.__dict__["_reply_constraints"] = rc
+        else:
+            rc = ToolConstraints(
+                token_budget=remaining_budget,
+                timeout_ms=self.constraints.timeout_ms,
+                max_depth_hops=max(0, self.constraints.max_depth_hops - 1),
+            )
+        obj = EmcpFrame.__new__(EmcpFrame)
         # Fast-path construction (same pattern as EmcpFrame.unpack):
         # skip the __setattr__ cache-invalidation hook on every field
         # write.  A brand-new reply has no caches to invalidate, so the
         # hook is pure overhead (~2 µs for 12+ dict lookups).
-        obj = EmcpFrame.__new__(EmcpFrame)
         object.__setattr__(obj, "magic", self.magic)
         object.__setattr__(obj, "version", self.version)
         object.__setattr__(obj, "msg_type", MsgType.MSG_REPLY)
@@ -296,7 +317,7 @@ class EmcpFrame:
         object.__setattr__(obj, "status", status)
         object.__setattr__(obj, "verb", "tools/reply")
         object.__setattr__(obj, "args", result_data)
-        object.__setattr__(obj, "constraints", reply_constraints)
-        object.__setattr__(obj, "envelope", CryptoEnvelope())
+        object.__setattr__(obj, "constraints", rc)
+        object.__setattr__(obj, "envelope", _EMPTY_ENVELOPE)
         object.__setattr__(obj, "raw_payload", None)
         return obj

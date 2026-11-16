@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-11-15
+
+### Performance
+Measured with a round-trip harness on the development host (medians of 20
+runs of 20 000 in-process calls):
+
+| Operation | v0.9.0 | v0.10.0 | Change |
+| --- | --- | --- | --- |
+| `create_reply` (frame.py) | 2.50 us | 2.00 us | **−20%** |
+| server round-trip (`call_tool`) | 5.34 us | ~5.0 us | −6% (Python-side) |
+
+### Changed
+- `EmcpFrame.create_reply` builds the reply `ToolConstraints` once per request
+  and caches it on the request frame's `__dict__` (`_reply_constraints`). A
+  fresh `ToolConstraints` per reply was the single largest allocation on the
+  reply path. `remaining_budget` stays un-cached (one-shot value) so a later
+  reply with a different remainder is never served stale.
+- Reply frames reuse a single shared empty `CryptoEnvelope` (`_EMPTY_ENVELOPE`)
+  instead of allocating one per reply; the reply envelope is never signed or
+  mutated on this path.
+- `EmcpClient.call_tool` and `EmcpClient.list_tools` now share one
+  `_build_request_frame` helper, removing duplicated inline frame construction
+  and unifying the `transaction_id` counter increment.
+
+No behaviour change, no new dependencies. 66/66 tests pass.
+
+## [0.9.0] - 2026-11-13
+
+### Performance
+Skip the dataclass `__setattr__` cache-invalidation hook when building
+brand-new frames (same pattern `EmcpFrame.unpack` already used). A new frame
+has no caches to invalidate, so the hook was pure overhead.
+
+  `create_reply` (frame.py)      4.64 -> 2.16 us/op  (-53%)
+  `call_tool`  (client.py)       ~1.5 us saved per request
+  `list_tools` (client.py)       ~1.5 us saved per request
+  `verify_frame` tier-3 (sec.py) ~2 us saved on the raw_payload fallback
+  server round-trip (bench)   156 -> 145 us/op     (-9%)
+
+No behaviour change, no new dependencies. 66/66 tests pass.
+
 ## [0.8.0] - 2026-11-10
 
 ### Changed
