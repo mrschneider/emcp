@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from emcp import EmcpClient, EmcpServer, EmcpError, EmcpFrame, McpStdioProcessAdapter
+from emcp.constants import Capability
 from emcp.dtn import ToolBundle, ToolCustodyStore
 from emcp.qos import ToolOwnershipArbitrator
 
@@ -121,7 +122,7 @@ class DrainTests(unittest.TestCase):
 
 class AsyncAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.adapter = McpStdioProcessAdapter('async-test', [sys.executable, MOCK])
+        self.adapter = McpStdioProcessAdapter('async-test', [sys.executable, MOCK], tool_capabilities={'query_database': Capability.CAP_DATABASE_QUERY, 'drop_database': Capability.CAP_DATABASE_MUTATE, 'fetch_huge_log': Capability.NONE, 'slow_tool': Capability.NONE})
         self.client = EmcpClient()
 
     async def asyncTearDown(self):

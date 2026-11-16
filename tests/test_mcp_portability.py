@@ -23,6 +23,7 @@ class TestMcpStdioPortability(unittest.IsolatedAsyncioTestCase):
             "query_database": Capability.CAP_DATABASE_QUERY,
             "drop_database": Capability.CAP_DATABASE_MUTATE,
             "fetch_huge_log": Capability.NONE,
+            "slow_tool": Capability.NONE,
         }
 
         # Spawn the real standalone MCP JSON-RPC server over OS stdio pipes

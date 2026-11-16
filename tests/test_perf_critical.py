@@ -174,10 +174,12 @@ class TestStdioAdapterPipelining(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.adapter = McpStdioProcessAdapter(
+            tool_capabilities={"query_database": Capability.CAP_DATABASE_QUERY, "drop_database": Capability.CAP_DATABASE_MUTATE, "fetch_huge_log": Capability.NONE, "slow_tool": Capability.NONE},
+            allowed_capabilities=Capability.CAP_DATABASE_QUERY | Capability.CAP_DATABASE_MUTATE,
             name="pipe-mcp",
             command=[sys.executable, SERVER_SCRIPT],
         )
-        self.client = EmcpClient()
+        self.client = EmcpClient(allowed_capabilities=Capability.CAP_DATABASE_QUERY)
 
     async def asyncTearDown(self):
         self.adapter.close()

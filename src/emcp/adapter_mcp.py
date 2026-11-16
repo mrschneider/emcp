@@ -33,6 +33,15 @@ class McpLegacyAdapter(EmcpServer):
         self.tool_capabilities = tool_capabilities or {}
         self._import_mcp_tools()
 
+    def _required_capability(self, tool_name: str) -> Capability:
+        """Fail closed for discovered MCP tools without an explicit policy.
+
+        Explicit Capability.NONE is permitted for deliberately public tools.
+        """
+        if tool_name not in self.tool_capabilities:
+            raise ValueError(f"MCP tool {tool_name!r} has no capability policy")
+        return self.tool_capabilities[tool_name]
+
     def _import_mcp_tools(self) -> None:
         """Discovers tools exposed by the underlying MCP JSON-RPC server."""
         try:
@@ -43,7 +52,7 @@ class McpLegacyAdapter(EmcpServer):
                 t_name = t["name"]
                 t_desc = t.get("description", "")
                 t_schema = t.get("inputSchema", {})
-                req_caps = self.tool_capabilities.get(t_name, Capability.NONE)
+                req_caps = self._required_capability(t_name)
 
                 def make_handler(name: str):
                     def handler(**kwargs):
@@ -67,8 +76,8 @@ class McpLegacyAdapter(EmcpServer):
                     input_schema=t_schema,
                 )(make_handler(t_name))
 
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"MCP tool discovery failed: {exc}") from exc
 
 
 class McpStdioProcessAdapter(EmcpServer):
@@ -133,6 +142,12 @@ class McpStdioProcessAdapter(EmcpServer):
         self._writer = threading.Thread(target=self._write_loop, daemon=True,
                                         name=f"emcp-mcp-writer-{name}")
         self._writer.start()
+
+    def _required_capability(self, tool_name: str) -> Capability:
+        """Require an explicit capability policy for every discovered tool."""
+        if tool_name not in self.tool_capabilities:
+            raise ValueError(f"MCP tool {tool_name!r} has no capability policy")
+        return self.tool_capabilities[tool_name]
 
     # -- JSON-RPC over stdio ---------------------------------------------
 
@@ -330,7 +345,7 @@ class McpStdioProcessAdapter(EmcpServer):
             t_name = t["name"]
             t_desc = t.get("description", "")
             t_schema = t.get("inputSchema", {})
-            req_caps = self.tool_capabilities.get(t_name, Capability.NONE)
+            req_caps = self._required_capability(t_name)
 
             def make_handler(name: str):
                 async def handler(**kwargs):
