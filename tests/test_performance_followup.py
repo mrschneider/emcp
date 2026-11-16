@@ -121,7 +121,7 @@ class DrainTests(unittest.TestCase):
 
 class AsyncAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.adapter = McpStdioProcessAdapter('async-test', [sys.executable, MOCK])
+        self.adapter = McpStdioProcessAdapter('async-test', [sys.executable, MOCK], tool_capabilities={'query_database': 0, 'drop_database': 0, 'fetch_huge_log': 0, 'slow_tool': 0})
         self.client = EmcpClient()
 
     async def asyncTearDown(self):
