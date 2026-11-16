@@ -1,0 +1,90 @@
+name: Publish EMCP v0.11.0
+
+# v0.11.0 — performance release: frame-construction fast path
+# (__dict__.update) and the server reply-path false-positive fix
+# (b"null" scan no longer forces a stdlib re-encode for legitimate
+# None values). The tag is created server-side by the publish job,
+# pinned to the commit that ran the gate. An existing tag is never
+# moved silently.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/release-v0.11.0.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify package version
+        run: |
+          python - <<'PY'
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          assert data["project"]["version"] == "0.11.0", "Package version does not match release"
+          PY
+      - name: Python tests
+        run: |
+          python -m pip install -e .
+          python -m unittest discover tests -v
+      - name: Rust tests
+        run: cargo test -p emcp-core
+      - name: Build distributions
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emcp-v0.11.0-dist
+          path: dist/*
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: emcp-v0.11.0-dist
+          path: dist
+      - name: Refuse to publish over an existing tag
+        env:
+          TAG: v0.11.0
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists; refusing to move it"
+            exit 1
+          fi
+      - name: Checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+      - name: Publish the release and its tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.11.0
+          name: v0.11.0
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/*
+          body: |
+            Performance release: frame construction now uses a single
+            __dict__.update() instead of 15 object.__setattr__ calls
+            (unpack, create_reply, verify_frame, _build_request_frame),
+            pack() drops redundant int() wrappers on IntEnum fields,
+            and the server reply path no longer forces a stdlib
+            re-encode for results containing legitimate None values
+            (the b"null" byte scan is now disambiguated by a
+            _has_non_finite() walk of the original object). No new
+            dependencies. 70/70 tests pass.

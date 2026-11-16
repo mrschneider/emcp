@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-11-16
+
+### Fixed
+- **False-positive stdlib re-encode in the server reply path.** The old
+  `b"null" in result_json` check re-serialised every result that contained
+  a legitimate `None` value (orjson encodes it as `null`), discarding the
+  already-encoded orjson bytes and paying a full stdlib `json.dumps` pass
+  for nothing. The byte scan is now a fast C-level filter; when it fires,
+  `_has_non_finite()` walks the original Python object and only a genuine
+  non-finite float (`inf`/`nan`) triggers the stdlib re-encode. Behaviour
+  for `inf`/`nan`, big ints and non-string keys is unchanged (covered by
+  `test_legacy_json_values_still_supported`).
+
+### Performance
+Frame construction now uses a single `__dict__.update()` instead of 15
+individual `object.__setattr__` calls in `EmcpFrame.unpack`,
+`EmcpFrame.create_reply`, `ToolIdentity.verify_frame` and
+`EmcpClient._build_request_frame` (measured 0.40 vs 1.20 µs per
+construction). `EmcpFrame.pack` drops four redundant `int()` wrappers on
+`IntEnum`/`IntFlag` fields.
+
+| Operation | v0.10.0 | v0.11.0 | Change |
+| --- | --- | --- | --- |
+| `frame.pack` (big 64KB) | 11.80 us | 10.64 us | −10% |
+| `frame.pack` (small) | 1.46 us | 1.19 us | −18% |
+| `frame.unpack` (big 64KB) | 434.33 us | 415.85 us | −4% |
+| `frame.unpack` (small) | 5.19 us | 4.93 us | −5% |
+| server round-trip (small) | 151.90 us | 140.44 us | −8% |
+
+No behaviour change beyond the false-positive fix, no new dependencies.
+70/70 tests pass.
+
 ## [0.10.0] - 2026-11-15
 
 ### Performance

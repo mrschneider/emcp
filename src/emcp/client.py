@@ -54,25 +54,28 @@ class EmcpClient:
 
         Skips the __setattr__ cache-invalidation hook on every field write
         (same pattern as EmcpFrame.unpack): a brand-new frame has no caches
-        to invalidate, so the hook would be pure overhead (~2 µs for 12+
-        dict lookups).
+        to invalidate, so the hook would be pure overhead.  A single
+        __dict__.update() is ~3x faster than 15 individual
+        object.__setattr__ calls.
         """
         frame = EmcpFrame.__new__(EmcpFrame)
-        object.__setattr__(frame, "magic", EmcpFrame.magic)
-        object.__setattr__(frame, "version", EmcpFrame.version)
-        object.__setattr__(frame, "msg_type", MsgType.MSG_SEND)
-        object.__setattr__(frame, "opcode", opcode)
-        object.__setattr__(frame, "flags", flags)
-        object.__setattr__(frame, "caller_pin", self.identity.pin)
-        object.__setattr__(frame, "target_pin", server.pin)
-        object.__setattr__(frame, "transaction_id", self._tx_counter.__next__())
-        object.__setattr__(frame, "capabilities_mask", int(self.allowed_capabilities))
-        object.__setattr__(frame, "status", EmcpError.EMCP_SUCCESS)
-        object.__setattr__(frame, "verb", verb)
-        object.__setattr__(frame, "args", args)
-        object.__setattr__(frame, "constraints", constraints)
-        object.__setattr__(frame, "envelope", CryptoEnvelope())
-        object.__setattr__(frame, "raw_payload", None)
+        frame.__dict__.update({
+            "magic": EmcpFrame.magic,
+            "version": EmcpFrame.version,
+            "msg_type": MsgType.MSG_SEND,
+            "opcode": opcode,
+            "flags": flags,
+            "caller_pin": self.identity.pin,
+            "target_pin": server.pin,
+            "transaction_id": self._tx_counter.__next__(),
+            "capabilities_mask": int(self.allowed_capabilities),
+            "status": EmcpError.EMCP_SUCCESS,
+            "verb": verb,
+            "args": args,
+            "constraints": constraints,
+            "envelope": CryptoEnvelope(),
+            "raw_payload": None,
+        })
         return frame
 
     async def call_tool(

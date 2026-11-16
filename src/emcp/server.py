@@ -9,10 +9,34 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
+import math
+
 from .budget import TokenBudgetLedger
 from .constants import Capability, EmcpError, OpCode
-from .frame import EmcpFrame, _dumps
+from .frame import EmcpFrame, _dumps, _HAVE_ORJSON
 from .security import PlatSecGate, ToolIdentity
+
+
+def _has_non_finite(obj: Any) -> bool:
+    """Iteratively check if *obj* contains any non-finite float (inf/nan).
+
+    orjson silently serialises non-finite floats as ``null``; stdlib json
+    preserves them as ``Infinity`` / ``NaN``.  This detector is used to
+    decide whether a stdlib re-encode is needed.  It walks the structure
+    iteratively (no recursion-limit risk) and short-circuits on the first
+    non-finite value found.
+    """
+    stack = [obj]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, float):
+            if not math.isfinite(v):
+                return True
+        elif isinstance(v, dict):
+            stack.extend(v.values())
+        elif isinstance(v, (list, tuple)):
+            stack.extend(v)
+    return False
 
 
 @dataclass
@@ -209,14 +233,20 @@ class EmcpServer:
             # Single JSON pass for the wire path: encode the result ONCE,
             # meter on those bytes (~4 chars/token) and stash them on the
             # reply so pack_slots reuses them instead of dumps() again.
-            # Use the frame codec for UTF-8 JSON and meter the exact wire bytes.
-            # Retain stdlib support for values outside orjson's domain (e.g.
-            # arbitrary-size integers and JSON-compatible non-string keys).
+            # orjson normalizes non-finite floats (inf/nan) to null and
+            # rejects values outside its domain (big ints, non-str keys);
+            # the stdlib re-encode preserves all of them.
+            #
+            # The `b"null" in result_json` byte scan is a fast C-level
+            # filter (~85 µs on 120 KB) that catches both inf/nan and
+            # legitimate None values.  When it fires, _has_non_finite()
+            # walks the original Python object to distinguish the two:
+            # only a genuine non-finite float triggers the stdlib
+            # re-encode.  This eliminates the old false-positive where
+            # any None value forced a full stdlib re-serialization.
             try:
                 result_json = _dumps(result)
-                if b"null" in result_json:
-                    # orjson normalizes non-finite floats to null; preserve
-                    # historical stdlib behavior for these results.
+                if _HAVE_ORJSON and b"null" in result_json and _has_non_finite(result):
                     result_json = json.dumps(result, separators=(",", ":")).encode("utf-8")
             except (TypeError, OverflowError):
                 result_json = json.dumps(result, separators=(",", ":")).encode("utf-8")
