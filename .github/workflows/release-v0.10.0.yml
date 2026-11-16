@@ -59,9 +59,8 @@ jobs:
         with:
           name: emcp-v0.10.0-dist
           path: dist
-      - name: Publish immutable release tag and GitHub Release
+      - name: Refuse to publish over an existing tag
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: v0.10.0
         run: |
           set -euo pipefail
@@ -69,7 +68,25 @@ jobs:
             echo "::error::Tag $TAG already exists; refusing to move it"
             exit 1
           fi
-          git tag -a "$TAG" "$GITHUB_SHA" -m "EMCP $TAG — capability policy and escrow hardening"
-          git push origin "refs/tags/$TAG"
-          sha256sum dist/* > dist/SHA256SUMS
-          gh release create "$TAG" dist/* --verify-tag --title "EMCP $TAG" --notes "Security hardening release: explicit capability policies for discovered MCP tools, fail-closed discovery errors, escrow lifecycle accounting corrections, duplicate transaction ID rejection, and regression coverage. Python and Rust tests are required to pass before publication."
+      - name: Checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+      # The release and its tag are created server-side by the action, in
+      # one call, pinned to the commit that ran the gate. The previous
+      # version of this job created the tag with `git tag -a` + `git push`
+      # and then ran `gh release create --verify-tag`; the annotated-tag
+      # step needs a git identity in the runner and died there, leaving
+      # the release unpublished.
+      - name: Publish the release and its tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.10.0
+          name: v0.10.0
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/*
+          body: |
+            Security hardening release: explicit capability policies for
+            discovered MCP tools, fail-closed discovery errors, escrow
+            lifecycle accounting corrections, duplicate transaction ID
+            rejection, and regression coverage. Python and Rust tests are
+            required to pass before publication.
