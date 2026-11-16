@@ -174,6 +174,7 @@ class TestStdioAdapterPipelining(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.adapter = McpStdioProcessAdapter(
+            tool_capabilities={"query_database": Capability.CAP_DATABASE_QUERY, "drop_database": Capability.CAP_DATABASE_MUTATE, "fetch_huge_log": Capability.NONE, "slow_tool": Capability.NONE},
             name="pipe-mcp",
             command=[sys.executable, SERVER_SCRIPT],
         )
