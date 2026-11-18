@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import struct
 from dataclasses import dataclass, field
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Union
 
 # Optional fast JSON (orjson). Falls back to stdlib json when orjson is not
 # installed — the wire format is identical, so no code path changes.
@@ -44,6 +44,12 @@ from .constants import (
 
 HEADER_STRUCT = struct.Struct(">2sBBHHQQQQII")
 assert HEADER_STRUCT.size == HEADER_SIZE == 48
+
+# Payloads at or above this size use a zero-copy memoryview in unpack()
+# instead of a bytes slice: creating a memoryview costs ~0.18us flat while a
+# bytes copy costs ~0.08us + ~0.037ns/byte, so the crossover is ~2.7KB. We
+# start the memoryview path at 4KB where it is unambiguously cheaper.
+_ZERO_COPY_MIN_PAYLOAD = 4096
 
 # Sentinel distinguishing "no lazy args pending" from a legitimately
 # empty (b"") raw slot1 in EmcpFrame.__getattr__.
@@ -108,7 +114,9 @@ class EmcpFrame:
     args: Any = None
     constraints: ToolConstraints = field(default_factory=ToolConstraints)
     envelope: CryptoEnvelope = field(default_factory=CryptoEnvelope)
-    raw_payload: Optional[bytes] = None
+    # Parsed-wire payload cache. A bytes slice for small frames, a zero-copy
+    # memoryview of the wire buffer for large ones (see unpack()).
+    raw_payload: Optional[Union[bytes, memoryview]] = None
 
     def __setattr__(self, name: str, value: object) -> None:
         """Mutation invalidates caches: raw_payload (parsed wire),
@@ -167,9 +175,12 @@ class EmcpFrame:
         if raw is _MISSING:
             raise AttributeError(name)
         try:
-            args = _loads(raw)
+            # orjson (the default) reads memoryview directly; the stdlib
+            # fallback only accepts str/bytes/bytearray, so materialise a
+            # memoryview first. bytes() is identity for bytes input.
+            args = _loads(raw if _HAVE_ORJSON else bytes(raw))
         except Exception:
-            args = raw  # mirror unpack_slots: malformed slot1 stays raw bytes
+            args = raw  # mirror unpack_slots: malformed slot1 stays raw
         d["args"] = args
         return args
 
@@ -183,7 +194,12 @@ class EmcpFrame:
             return _dumps(self.args)
         return str(self.args).encode("utf-8")
 
-    def pack_slots(self) -> bytes:
+    def _slots_parts(self) -> Tuple[bytes, bytes, bytes, bytes, bytes]:
+        """Builds the five payload parts (lens, slot0..slot3) without joining.
+
+        Shared by ``pack_slots`` (join only) and ``pack`` (join with the
+        header) so a large slot1 is copied exactly once per serialisation.
+        """
         slot0 = self.verb.encode("utf-8") if self.verb else b""
         # Fastest repack path: a frame parsed from the wire that has not had
         # its args materialised still holds the exact slot1 bytes under
@@ -209,15 +225,43 @@ class EmcpFrame:
         slot3 = (self.envelope or CryptoEnvelope()).pack()
 
         lens = struct.pack(">IIII", len(slot0), len(slot1), len(slot2), len(slot3))
+        return (lens, slot0, slot1, slot2, slot3)
+
+    def pack_slots(self) -> bytes:
         # b''.join() is measurably faster than chained + for a 5-way
         # concat (6.5 vs 16.1us on a 64KB payload): it computes the final
         # size once and copies each part exactly once.
-        return b"".join((lens, slot0, slot1, slot2, slot3))
+        return b"".join(self._slots_parts())
 
     def pack(self) -> bytes:
-        payload = self.raw_payload if self.raw_payload is not None else self.pack_slots()
         # msg_type, opcode, flags, status are IntEnum/IntFlag — already
         # ints, so the old int() wrappers were redundant.
+        if self.raw_payload is not None:
+            # Wire-relay fast path: the payload is already the exact wire
+            # bytes, so one header + payload concat (a single copy).
+            payload = self.raw_payload
+            header = HEADER_STRUCT.pack(
+                self.magic,
+                self.version,
+                self.msg_type,
+                self.opcode,
+                self.flags,
+                self.caller_pin,
+                self.target_pin,
+                self.transaction_id,
+                self.capabilities_mask,
+                self.status,
+                len(payload),
+            )
+            return header + payload
+
+        # Fresh-serialisation path: build header + all slots in ONE b''.join
+        # so a large slot1 is copied exactly once. The old path joined the
+        # slots in pack_slots() and then concat'd header + payload in pack(),
+        # copying the 64KB payload twice (~9us -> ~5us on a 64KB frame).
+        parts = self._slots_parts()
+        # parts[0] is the 16-byte slot-length word; the payload is all five.
+        payload_len = len(parts[0]) + len(parts[1]) + len(parts[2]) + len(parts[3]) + len(parts[4])
         header = HEADER_STRUCT.pack(
             self.magic,
             self.version,
@@ -229,9 +273,9 @@ class EmcpFrame:
             self.transaction_id,
             self.capabilities_mask,
             self.status,
-            len(payload),
+            payload_len,
         )
-        return header + payload
+        return b"".join((header,) + parts)
 
     @classmethod
     def unpack(cls, raw: bytes, max_payload_size: int = DEFAULT_MAX_PAYLOAD_SIZE) -> EmcpFrame:
@@ -248,7 +292,17 @@ class EmcpFrame:
         if payload_len > max_payload_size:
             raise ValueError(f"Payload size {payload_len} exceeds max {max_payload_size}")
 
-        payload = raw[HEADER_SIZE : HEADER_SIZE + payload_len]
+        # Zero-copy payload view for large frames: a memoryview slice of the
+        # (immutable) wire bytes costs ~0.2us flat, versus a 64KB bytes copy
+        # (~2.4us). For small payloads the bytes copy is actually cheaper than
+        # creating a memoryview (0.08 vs 0.18us), so we keep the bytes path
+        # below the threshold. The view pins `raw` for the frame's lifetime —
+        # safe because bytes are immutable, and EMCP unpacks single frames so
+        # the pinned buffer is exactly this frame (no larger batch retained).
+        if payload_len >= _ZERO_COPY_MIN_PAYLOAD:
+            payload = memoryview(raw)[HEADER_SIZE : HEADER_SIZE + payload_len]
+        else:
+            payload = raw[HEADER_SIZE : HEADER_SIZE + payload_len]
         if len(payload) < payload_len:
             raise ValueError(f"Payload truncated: need {payload_len}, got {len(payload)}")
 
@@ -283,9 +337,14 @@ class EmcpFrame:
             "envelope": envelope,
             "raw_payload": payload,
         }
-        if isinstance(args, (bytes, bytearray)):
-            # Non-empty slot1: defer the decode (lazy). Store a bytes copy so
-            # the frame owns the buffer independent of the payload slice.
+        if isinstance(args, memoryview):
+            # Zero-copy: the view already borrows the pinned wire buffer
+            # (raw_payload), so no re-allocation of the (potentially 64KB)
+            # slot1 bytes. This is the dominant cost of a big unpack.
+            fields["_args_raw"] = args
+        elif isinstance(args, (bytes, bytearray)):
+            # Standalone bytes/bytearray (direct unpack_slots call): bytes()
+            # is identity for bytes, a cheap copy for bytearray.
             fields["_args_raw"] = bytes(args)
         else:
             fields["args"] = args  # None (empty slot1) — no lazy decode needed
@@ -293,7 +352,10 @@ class EmcpFrame:
         return obj
 
     @classmethod
-    def unpack_slots(cls, payload: bytes, lazy_args: bool = False) -> Tuple[str, Any, ToolConstraints, CryptoEnvelope]:
+    def unpack_slots(cls, payload, lazy_args: bool = False) -> Tuple[str, Any, ToolConstraints, CryptoEnvelope]:
+        # `payload` may be bytes (direct call) or a zero-copy memoryview
+        # (the EmcpFrame.unpack fast path). bytes(x) is identity for bytes
+        # and only copies for memoryview, so the bytes path pays nothing.
         if len(payload) < 16:
             return ("", None, ToolConstraints(), CryptoEnvelope())
 
@@ -309,8 +371,9 @@ class EmcpFrame:
         slot0_bytes = payload[offset : offset + l0]
         offset += l0
         # Strict decode (EMCP spec): malformed verb bytes are a protocol
-        # error, never silently tolerated.
-        verb = slot0_bytes.decode("utf-8")
+        # error, never silently tolerated. bytes() is a no-op for the common
+        # bytes input and materialises the (tiny) verb for a memoryview.
+        verb = bytes(slot0_bytes).decode("utf-8")
 
         slot1_bytes = payload[offset : offset + l1]
         offset += l1
@@ -318,8 +381,8 @@ class EmcpFrame:
             args = None
         elif lazy_args:
             # Defer the JSON decode to the first frame.args access
-            # (EmcpFrame.__getattr__). Return the raw slot1 bytes so the
-            # caller can stash them; an empty slot1 is already handled.
+            # (EmcpFrame.__getattr__). Return the raw slot1 view so the
+            # caller can stash it; an empty slot1 is already handled.
             args = slot1_bytes
         else:
             try:
@@ -327,10 +390,11 @@ class EmcpFrame:
                 # native bytes path skips the separate utf-8 decode (measured
                 # ~15us on a 64KB payload) and is in fact *faster* than the
                 # str path (367 vs 403us/op); stdlib json.loads also accepts
-                # bytes natively, so the no-orjson fallback path is unchanged.
-                args = _loads(slot1_bytes)
+                # bytes natively (but NOT memoryview), so materialise with
+                # bytes() — identity for the common bytes input.
+                args = _loads(bytes(slot1_bytes))
             except Exception:
-                args = slot1_bytes
+                args = bytes(slot1_bytes)
 
         slot2_bytes = payload[offset : offset + l2]
         offset += l2

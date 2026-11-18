@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-11-18
+
+### Performance
+- **Single-copy `EmcpFrame.pack`.** The old path joined the four slots in
+  `pack_slots()` and then concat'd `header + payload` in `pack()`, copying a
+  large slot1 (the JSON args) **twice** — once into the joined payload, once
+  into the final header+payload buffer. `pack` now builds the header and all
+  five payload parts in a **single `b"".join`**, so a large slot1 is copied
+  exactly once per serialisation. The wire-relay fast path (a frame that
+  already holds its exact `raw_payload`) keeps its single-concat shape.
+- **Zero-copy `EmcpFrame.unpack` for large payloads.** For payloads at or
+  above 4 KB, `unpack` now keeps `raw_payload` as a `memoryview` of the
+  (immutable) wire buffer instead of a 64 KB `bytes` slice, and stashes the
+  lazy `_args_raw` slot1 as a `memoryview` too — the buffer is already pinned
+  by `raw_payload`, so no second copy is needed. Below 4 KB the cheap `bytes`
+  slice is kept, because creating a `memoryview` (~0.18 µs flat) is more
+  expensive than copying a small buffer (~0.08 µs). `unpack_slots` and the
+  lazy `__getattr__` decode accept both `bytes` and `memoryview` (orjson reads
+  a `memoryview` directly; the stdlib-`json` fallback materialises it with
+  `bytes()` first, which is identity for the common `bytes` input).
+
+| Operation | v0.12.0 | v0.13.0 | Change |
+| --- | --- | --- | --- |
+| `frame.pack` (big 64KB) | 13.5 us | 6.1 us | −55% (2.2x) |
+| `frame.unpack` (big 64KB) | 17.4 us | 5.0 us | −71% (3.5x) |
+| `frame.pack` (small) | 1.4 us | 1.5 us | ~unchanged |
+| `frame.unpack` (small) | 4.1 us | 4.2 us | ~unchanged |
+
+No behaviour change: the wire format is byte-identical on `pack`/`unpack`
+(verified for big, small, mid-size, empty and list payloads, including
+double-relay), signature verification over the wire and fail-closed tamper
+detection are intact, and the full suite passes. 70/70 tests pass.
+
 ## [0.12.0] - 2026-11-17
 
 ### Performance

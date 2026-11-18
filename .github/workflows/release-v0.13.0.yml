@@ -1,0 +1,94 @@
+name: Publish EMCP v0.13.0
+
+# v0.13.0 — performance release: single-copy EmcpFrame.pack (a large slot1 is
+# now copied exactly once per serialisation instead of twice) and zero-copy
+# EmcpFrame.unpack for payloads >= 4KB (raw_payload and the lazy _args_raw
+# slot1 become memoryviews of the immutable wire buffer, so no 64KB copy).
+# The tag is created server-side by the publish job, pinned to the commit that
+# ran the gate. An existing tag is never moved silently.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/release-v0.13.0.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify package version
+        run: |
+          python - <<'PY'
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          assert data["project"]["version"] == "0.13.0", "Package version does not match release"
+          PY
+      - name: Python tests
+        run: |
+          python -m pip install -e .
+          python -m unittest discover tests -v
+      - name: Rust tests
+        run: cargo test -p emcp-core
+      - name: Build distributions
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emcp-v0.13.0-dist
+          path: dist/*
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: emcp-v0.13.0-dist
+          path: dist
+      - name: Refuse to publish over an existing tag
+        env:
+          TAG: v0.13.0
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists; refusing to move it"
+            exit 1
+          fi
+      - name: Checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+      - name: Publish the release and its tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.13.0
+          name: v0.13.0
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/*
+          body: |
+            Performance release. Single-copy EmcpFrame.pack: the header and
+            all payload slots are now built in one b"".join, so a large slot1
+            (the JSON args) is copied exactly once per serialisation instead
+            of twice. Zero-copy EmcpFrame.unpack for payloads >= 4KB:
+            raw_payload and the lazy _args_raw slot1 become memoryviews of
+            the immutable wire buffer, eliminating the 64KB copies; small
+            payloads keep the cheap bytes slice.
+
+            frame.pack (big 64KB): 13.5us -> 6.1us (-55%, 2.2x)
+            frame.unpack (big 64KB): 17.4us -> 5.0us (-71%, 3.5x)
+            frame.pack/unpack (small): unchanged
+
+            Wire format byte-identical on pack/unpack. 70/70 tests pass.
