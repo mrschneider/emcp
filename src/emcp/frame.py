@@ -45,6 +45,10 @@ from .constants import (
 HEADER_STRUCT = struct.Struct(">2sBBHHQQQQII")
 assert HEADER_STRUCT.size == HEADER_SIZE == 48
 
+# Sentinel distinguishing "no lazy args pending" from a legitimately
+# empty (b"") raw slot1 in EmcpFrame.__getattr__.
+_MISSING = object()
+
 
 @dataclass
 class ToolConstraints:
@@ -119,8 +123,13 @@ class EmcpFrame:
         consulted when a signature is actually cached.
         """
         d = self.__dict__
-        if name == "args" and "_args_json" in d:
-            object.__setattr__(self, "_args_json", None)
+        if name == "args":
+            # A new args object invalidates both the encoded stash and any
+            # pending lazy-decode buffer (the raw slot1 bytes are now stale).
+            if "_args_json" in d:
+                object.__setattr__(self, "_args_json", None)
+            if "_args_raw" in d:
+                object.__setattr__(self, "_args_raw", None)
         if name != "raw_payload" and d.get("raw_payload") is not None:
             object.__setattr__(self, "raw_payload", None)
         # A changed field must invalidate the signed-bytes cache too:
@@ -138,6 +147,32 @@ class EmcpFrame:
             object.__setattr__(self, "_signed_bytes_ref", None)
         object.__setattr__(self, name, value)
 
+    def __getattr__(self, name: str) -> Any:
+        """Lazy slot1 (args) decode for frames parsed from the wire.
+
+        ``EmcpFrame.unpack`` defers the JSON decode of slot1 — the dominant
+        cost of a big-frame unpack (orjson.loads is ~90% of it) — by stashing
+        the raw slot1 bytes under ``_args_raw`` and leaving ``args`` unset.
+        This ``__getattr__`` runs only when normal attribute lookup misses
+        (i.e. ``args`` was never materialised), decodes on first access and
+        rewrites ``__dict__`` so the very next read is a plain hit. A frame
+        built in-process (dataclass default) or with explicit ``args`` always
+        has the key present and never pays this path; a frame whose slot1 was
+        empty stores ``args = None`` directly and also never gets here.
+        """
+        if name != "args":
+            raise AttributeError(name)
+        d = self.__dict__
+        raw = d.pop("_args_raw", _MISSING)
+        if raw is _MISSING:
+            raise AttributeError(name)
+        try:
+            args = _loads(raw)
+        except Exception:
+            args = raw  # mirror unpack_slots: malformed slot1 stays raw bytes
+        d["args"] = args
+        return args
+
     def _encode_args(self) -> bytes:
         """Single source of truth for slot1 encoding."""
         if self.args is None:
@@ -150,15 +185,25 @@ class EmcpFrame:
 
     def pack_slots(self) -> bytes:
         slot0 = self.verb.encode("utf-8") if self.verb else b""
-        pre_encoded = self.__dict__.get("_args_json")
-        if pre_encoded is None:
-            pre_encoded = self._encode_args()
-            # Stash so a second pass (sign_frame -> pack, unpack -> repack)
-            # never re-runs json.dumps on the same args. `args` mutation
-            # invalidates the stash via __setattr__. Bypass the hook so a
-            # parsed-wire frame keeps its raw_payload cache intact.
-            object.__setattr__(self, "_args_json", pre_encoded)
-        slot1 = pre_encoded
+        # Fastest repack path: a frame parsed from the wire that has not had
+        # its args materialised still holds the exact slot1 bytes under
+        # _args_raw. Reusing them is byte-identical to the wire (no JSON
+        # decode + re-encode), which is the relay path. Once args is read
+        # (__getattr__ pops _args_raw) this falls through to the normal
+        # encode so any in-place mutation is captured.
+        raw_slot1 = self.__dict__.get("_args_raw")
+        if raw_slot1 is not None:
+            slot1 = raw_slot1
+        else:
+            pre_encoded = self.__dict__.get("_args_json")
+            if pre_encoded is None:
+                pre_encoded = self._encode_args()
+                # Stash so a second pass (sign_frame -> pack, unpack -> repack)
+                # never re-runs json.dumps on the same args. `args` mutation
+                # invalidates the stash via __setattr__. Bypass the hook so a
+                # parsed-wire frame keeps its raw_payload cache intact.
+                object.__setattr__(self, "_args_json", pre_encoded)
+            slot1 = pre_encoded
 
         slot2 = (self.constraints or ToolConstraints()).pack()
         slot3 = (self.envelope or CryptoEnvelope()).pack()
@@ -207,15 +252,22 @@ class EmcpFrame:
         if len(payload) < payload_len:
             raise ValueError(f"Payload truncated: need {payload_len}, got {len(payload)}")
 
-        verb, args, constraints, envelope = cls.unpack_slots(payload)
+        verb, args, constraints, envelope = cls.unpack_slots(payload, lazy_args=True)
 
         # Fast-path construction: the dataclass __setattr__ override runs a
         # cache-invalidation check on *every* attribute write.  During unpack
         # the fields are set once, in order, so the invalidation logic is
         # pure overhead.  A single __dict__.update() is ~3x faster than 15
         # individual object.__setattr__ calls (measured 0.40 vs 1.20 µs).
+        #
+        # Lazy slot1: when the slot1 carries JSON, unpack_slots returns the
+        # raw bytes instead of decoding. We stash them under _args_raw and
+        # leave `args` UNSET so the first frame.args read triggers __getattr__
+        # (which decodes once and caches). An empty slot1 yields args=None
+        # directly. This defers orjson.loads — the dominant cost of a big
+        # unpack — until a consumer actually needs the arguments.
         obj = cls.__new__(cls)
-        obj.__dict__.update({
+        fields = {
             "magic": magic,
             "version": ver,
             "msg_type": MsgType(msg_type_raw),
@@ -227,15 +279,21 @@ class EmcpFrame:
             "capabilities_mask": cap_mask,
             "status": status_raw,
             "verb": verb,
-            "args": args,
             "constraints": constraints,
             "envelope": envelope,
             "raw_payload": payload,
-        })
+        }
+        if isinstance(args, (bytes, bytearray)):
+            # Non-empty slot1: defer the decode (lazy). Store a bytes copy so
+            # the frame owns the buffer independent of the payload slice.
+            fields["_args_raw"] = bytes(args)
+        else:
+            fields["args"] = args  # None (empty slot1) — no lazy decode needed
+        obj.__dict__.update(fields)
         return obj
 
     @classmethod
-    def unpack_slots(cls, payload: bytes) -> Tuple[str, Any, ToolConstraints, CryptoEnvelope]:
+    def unpack_slots(cls, payload: bytes, lazy_args: bool = False) -> Tuple[str, Any, ToolConstraints, CryptoEnvelope]:
         if len(payload) < 16:
             return ("", None, ToolConstraints(), CryptoEnvelope())
 
@@ -256,8 +314,14 @@ class EmcpFrame:
 
         slot1_bytes = payload[offset : offset + l1]
         offset += l1
-        args = None
-        if slot1_bytes:
+        if not slot1_bytes:
+            args = None
+        elif lazy_args:
+            # Defer the JSON decode to the first frame.args access
+            # (EmcpFrame.__getattr__). Return the raw slot1 bytes so the
+            # caller can stash them; an empty slot1 is already handled.
+            args = slot1_bytes
+        else:
             try:
                 # Feed the raw bytes straight to the JSON decoder. orjson's
                 # native bytes path skips the separate utf-8 decode (measured
@@ -328,3 +392,15 @@ class EmcpFrame:
             "raw_payload": None,
         })
         return obj
+
+
+# The dataclass decorator stores each field's default as a class attribute
+# (EmcpFrame.args = None). That class-level default shadows the instance
+# __dict__: when unpack() leaves `args` unset (deferring the slot1 JSON
+# decode), a plain attribute lookup finds the class default (None) and
+# __getattr__ is never consulted, silently returning None. Deleting the
+# class attribute keeps the generated __init__ default (it lives in the
+# __init__ signature, not on the class) while letting __getattr__ own the
+# missing-instance case. Normal construction and dataclasses.fields()/
+# asdict() are unaffected — the field metadata is in __dataclass_fields__.
+del EmcpFrame.args

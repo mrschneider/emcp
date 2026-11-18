@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-11-17
+
+### Performance
+- **Lazy slot1 (args) JSON decode in `EmcpFrame.unpack`.** The unpack path
+  used to run `orjson.loads` on slot1 eagerly — ~90% of a 64KB-frame
+  unpack (~374 µs of the 403 µs total) — even when the consumer only needed
+  header metadata (verb, pins, status), as relays and the server do before
+  dispatch. `unpack` now stashes the raw slot1 bytes under `_args_raw` and
+  leaves `args` unset; a new `EmcpFrame.__getattr__` decodes on first access
+  and caches the result, so the decode happens at most once, only when the
+  arguments are actually read. `pack_slots` reuses `_args_raw` directly on
+  the wire→repack (relay) path, staying byte-identical to the wire with no
+  decode + re-encode. `__setattr__` invalidates `_args_raw` when `args` is
+  reassigned. The dataclass class-level `args` default is deleted after the
+  class body so the missing-instance case reaches `__getattr__` (the class
+  default would otherwise shadow it and silently return `None`). Malformed
+  slot1 bytes still fall back to raw bytes; an empty slot1 still yields
+  `args = None` directly.
+- **Adaptive sync-handler inline fast path in `EmcpServer.handle_frame`.**
+  A sync handler offloaded to a worker thread pays the full
+  `asyncio.to_thread()` offload cost (~79 µs) on top of its own work — 80%
+  of a trivial round-trip. The server now measures the offload cost once per
+  server (cached) and runs a sync handler inline when it is empirically
+  faster than a thread switch, falling back to `to_thread` for slow handlers
+  (I/O, big work) so they never stall the event loop.
+
+| Operation | v0.11.0 | v0.12.0 | Change |
+| --- | --- | --- | --- |
+| `frame.unpack` (big 64KB) | 415.85 us | 14.16 us | −97% (28x) |
+| `frame.unpack` (small) | 4.93 us | 4.00 us | −19% |
+| relay `unpack`→`pack` (big 64KB) | ~414 us | 19.56 us | −95% |
+| server round-trip (small) | 140.44 us | 73.42 us | −48% |
+
+No behaviour change: the wire format is byte-identical on `unpack`→`pack`
+(verified for big, small, empty and list payloads), and the full suite
+passes. 70/70 tests pass.
+
 ## [0.11.0] - 2026-11-16
 
 ### Fixed

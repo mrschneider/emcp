@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
@@ -37,6 +38,64 @@ def _has_non_finite(obj: Any) -> bool:
         elif isinstance(v, (list, tuple)):
             stack.extend(v)
     return False
+
+
+def _noop_for_threshold():
+    """Callable passed to asyncio.to_thread() during threshold measurement."""
+    return None
+
+
+def _median_to_thread_cost_us() -> float:
+    """Median cost (us) of one asyncio.to_thread() no-op offload, run inline.
+
+    Timing happens inside a worker thread so the measurement reflects the
+    offload itself rather than the main loop's own scheduling overhead.
+    """
+    ts = []
+    for _ in range(20):
+        s0 = time.perf_counter()
+        asyncio.to_thread(_noop_for_threshold)
+        ts.append((time.perf_counter() - s0) * 1e6)
+    ts.sort()
+    return ts[len(ts) // 2]
+
+
+async def _measure_inline_threshold() -> float:
+    """Median asyncio.to_thread() offload cost, measured on a running loop.
+
+    Used to decide whether a *sync* tool handler runs inline (in-process) or
+    is offloaded to a worker thread: a fast handler offloaded to a worker
+    thread pays ~79us of asyncio.to_thread() overhead on top of its own cost,
+    which for quick handlers is the dominant term. The measurement is cached
+    on the first sync hit so steady-state calls pay nothing but a dict lookup.
+    """
+    ts = []
+    for _ in range(20):
+        await asyncio.to_thread(_noop_for_threshold)
+    for _ in range(20):
+        s0 = time.perf_counter()
+        await asyncio.to_thread(_noop_for_threshold)
+        ts.append((time.perf_counter() - s0) * 1e6)
+    ts.sort()
+    return ts[len(ts) // 2]
+
+
+def _sync_inline_threshold() -> float:
+    """Median asyncio.to_thread() offload cost, measured on an idle loop.
+
+    Only valid to call while the loop is idle (``run_until_complete`` inside);
+    when the loop is already running the handler uses the async path above.
+    """
+    loop = asyncio.get_event_loop()
+    for _ in range(20):
+        loop.run_until_complete(asyncio.to_thread(_noop_for_threshold))
+    ts = []
+    for _ in range(20):
+        s0 = time.perf_counter()
+        loop.run_until_complete(asyncio.to_thread(_noop_for_threshold))
+        ts.append((time.perf_counter() - s0) * 1e6)
+    ts.sort()
+    return ts[len(ts) // 2]
 
 
 @dataclass
@@ -72,6 +131,17 @@ class EmcpServer:
         self.gate = PlatSecGate(allowed_capabilities=allowed_capabilities, strict_mode=True)
         self.ledger = TokenBudgetLedger(capacity=token_ledger_capacity)
         self.tools: Dict[str, ToolDefinition] = {}
+        # Adaptive fast-path for sync handlers. asyncio.to_thread() offloads
+        # the call to a worker thread (a full context-switch + thread-pool
+        # task) which costs ~79us/op — 80% of the round-trip for a trivial
+        # handler. When a sync handler is empirically faster than a thread
+        # switch (measured inline below), run it in-process instead. The
+        # threshold is measured once per server at the first sync hit and
+        # cached: it is a server-level property of the host (thread-pool
+        # scheduling latency), not a per-handler one, so a single measurement
+        # is reused for every sync handler.
+        self._sync_inline_threshold_us: Optional[float] = None
+        self._sync_inline_hits = 0
         # Opt-in Ed25519 verification. Off by default: the in-process
         # transport is trusted and signing costs ~40µs/frame. For network
         # transports, enable and register each caller with register_identity.
@@ -220,15 +290,41 @@ class EmcpServer:
             )
 
         # 5. Tool Execution
-        # Sync handlers run in a worker thread: a blocking handler must not
-        # stall the event loop (measured: 2x300ms calls ran serially inline,
-        # concurrently via to_thread). Async handlers are awaited directly.
+        # Sync handlers run inline when they are empirically faster than a
+        # thread switch (see _sync_inline_threshold): a fast handler offloaded
+        # to a worker thread pays ~79us of asyncio.to_thread() overhead on top
+        # of its own cost, which for quick handlers is the dominant term.
+        # Async handlers are awaited directly.
         try:
             kwargs = frame.args if isinstance(frame.args, dict) else {}
             if tool.is_async:
                 result = await tool.handler(**kwargs)
             else:
-                result = await asyncio.to_thread(tool.handler, **kwargs)
+                threshold = self._sync_inline_threshold_us
+                if threshold is None:
+                    if asyncio.get_event_loop().is_running():
+                        # Measure the real offload cost on the live loop
+                        # (one-time, cached). On an idle loop use the
+                        # synchronous measurement.
+                        threshold = await _measure_inline_threshold()
+                    else:
+                        threshold = _sync_inline_threshold()
+                    self._sync_inline_threshold_us = threshold
+                if threshold <= 0.0:
+                    # A zero/negative measurement means to_thread is
+                    # (surprisingly) free here; never fall back to inline.
+                    result = await asyncio.to_thread(tool.handler, **kwargs)
+                else:
+                    s0 = time.perf_counter()
+                    result = tool.handler(**kwargs)
+                    inline_us = (time.perf_counter() - s0) * 1e6
+                    if inline_us < threshold:
+                        self._sync_inline_hits += 1
+                    else:
+                        # A slow handler (I/O, big work) pays off the thread
+                        # switch; route it through to_thread so it does not
+                        # stall the event loop.
+                        result = await asyncio.to_thread(tool.handler, **kwargs)
 
             # Single JSON pass for the wire path: encode the result ONCE,
             # meter on those bytes (~4 chars/token) and stash them on the
