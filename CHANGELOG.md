@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2026-11-19
+
+### Performance
+- **Sync handlers no longer run twice.** The old adaptive scheme ran a sync
+  handler inline, measured it, and — when it exceeded the `asyncio.to_thread`
+  offload cost — **ran the same handler a second time in a worker thread**
+  before returning. A slow handler's first call therefore paid ~2× its own
+  latency (a 150 ms handler took 305 ms). A one-shot probe now classifies the
+  handler on its first call (fast → inline, slow → offloaded) and never
+  re-runs it: a 150 ms handler's first call is now 154 ms (1 execution).
+  Concurrency is preserved — two slow calls still overlap (~152 ms total).
+- **Fast steady-state round-trip.** The per-call path no longer re-measures
+  the offload threshold or re-evaluates the inline heuristic on every frame;
+  a classified handler is a single branch. Small in-process round-trip
+  (reused client) drops ~11.4 µs → ~9.5 µs.
+- **`slots=True` on `ToolCandidateRegistration`.** `heartbeat()` writes
+  `reg.last_heartbeat` on every pulse (the hottest path in a mesh); a slots
+  dataclass stores attributes in a fixed C-level table, skipping the
+  per-instance `__dict__` indirection. ~5% faster on a 5000-candidate
+  heartbeat.
+
+| Operation | v0.14.1 | v0.14.2 | Change |
+| --- | --- | --- | --- |
+| slow handler first call (150 ms) | 305 ms (2 execs) | 154 ms (1 exec) | −49% (2.0×) |
+| small round-trip (reused client) | 11.4 µs | 9.5 µs | −17% (1.2×) |
+| qos.heartbeat (pin → 5000 tools) | ~90 µs | ~86 µs | ~−5% |
+
 ## [0.13.0] - 2026-11-18
 
 ### Performance

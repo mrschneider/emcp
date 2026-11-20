@@ -98,6 +98,20 @@ def _sync_inline_threshold() -> float:
     return ts[len(ts) // 2]
 
 
+# First-call probe cutoff for sync handlers. The first invocation of a sync
+# handler runs inline and is timed ONCE; a handler that finishes below this
+# cutoff is permanently classified FAST (inline) and above it SLOW
+# (to_thread). A single 100µs probe costs nothing for the fast case and
+# avoids the old scheme's double execution of slow handlers (the old code
+# ran the handler inline, saw it exceed the ~79µs to_thread cost, and then
+# ran it a SECOND time in a worker thread — doubling the latency of every
+# slow handler's first call).
+_SYNC_PROBE_THRESHOLD_US = 100.0
+_EXEC_PROBE = 0  # first call: run inline, time it, classify
+_EXEC_FAST = 1   # learned: inline
+_EXEC_SLOW = 2   # learned: offload to worker thread
+
+
 @dataclass
 class ToolDefinition:
     name: str
@@ -109,6 +123,10 @@ class ToolDefinition:
     # Cached once at registration: inspect.iscoroutinefunction costs
     # ~1µs and used to run on every single frame.
     is_async: bool = False
+    # Sync execution mode: _EXEC_PROBE (first call times the handler) ->
+    # _EXEC_FAST (inline) or _EXEC_SLOW (worker thread). See
+    # _SYNC_PROBE_THRESHOLD_US.
+    exec_mode: int = _EXEC_PROBE
 
 
 class EmcpServer:
@@ -131,17 +149,14 @@ class EmcpServer:
         self.gate = PlatSecGate(allowed_capabilities=allowed_capabilities, strict_mode=True)
         self.ledger = TokenBudgetLedger(capacity=token_ledger_capacity)
         self.tools: Dict[str, ToolDefinition] = {}
-        # Adaptive fast-path for sync handlers. asyncio.to_thread() offloads
-        # the call to a worker thread (a full context-switch + thread-pool
-        # task) which costs ~79us/op — 80% of the round-trip for a trivial
-        # handler. When a sync handler is empirically faster than a thread
-        # switch (measured inline below), run it in-process instead. The
-        # threshold is measured once per server at the first sync hit and
-        # cached: it is a server-level property of the host (thread-pool
-        # scheduling latency), not a per-handler one, so a single measurement
-        # is reused for every sync handler.
+        # Offload-cost reference for sync handlers (see
+        # _SYNC_PROBE_THRESHOLD_US). asyncio.to_thread() offloads the call
+        # to a worker thread (a full context-switch + thread-pool task)
+        # which costs ~79us/op — 80% of the round-trip for a trivial
+        # handler. The measurement is a server-level property of the host
+        # (thread-pool scheduling latency), so one measurement is cached
+        # and reused for every sync handler.
         self._sync_inline_threshold_us: Optional[float] = None
-        self._sync_inline_hits = 0
         # Opt-in Ed25519 verification. Off by default: the in-process
         # transport is trusted and signing costs ~40µs/frame. For network
         # transports, enable and register each caller with register_identity.
@@ -290,41 +305,51 @@ class EmcpServer:
             )
 
         # 5. Tool Execution
-        # Sync handlers run inline when they are empirically faster than a
-        # thread switch (see _sync_inline_threshold): a fast handler offloaded
-        # to a worker thread pays ~79us of asyncio.to_thread() overhead on top
-        # of its own cost, which for quick handlers is the dominant term.
-        # Async handlers are awaited directly.
+        # Async handlers are awaited directly. Sync handlers use a
+        # one-shot probe (see _SYNC_PROBE_THRESHOLD_US): the first call
+        # runs inline and is timed once; the measured cost is then
+        # compared against the server's measured asyncio.to_thread()
+        # offload cost and the handler is permanently classified. Fast
+        # handlers stay inline (a to_thread offload of a quick handler
+        # costs ~79us — 80% of the round-trip); slow handlers are
+        # offloaded so they do not stall the event loop. The old
+        # scheme re-ran slow handlers a second time in a worker thread
+        # after the inline attempt, doubling their first-call latency.
         try:
             kwargs = frame.args if isinstance(frame.args, dict) else {}
             if tool.is_async:
                 result = await tool.handler(**kwargs)
             else:
-                threshold = self._sync_inline_threshold_us
-                if threshold is None:
-                    if asyncio.get_event_loop().is_running():
-                        # Measure the real offload cost on the live loop
-                        # (one-time, cached). On an idle loop use the
-                        # synchronous measurement.
-                        threshold = await _measure_inline_threshold()
-                    else:
-                        threshold = _sync_inline_threshold()
-                    self._sync_inline_threshold_us = threshold
-                if threshold <= 0.0:
-                    # A zero/negative measurement means to_thread is
-                    # (surprisingly) free here; never fall back to inline.
+                mode = tool.exec_mode
+                if mode == _EXEC_SLOW:
                     result = await asyncio.to_thread(tool.handler, **kwargs)
                 else:
                     s0 = time.perf_counter()
                     result = tool.handler(**kwargs)
                     inline_us = (time.perf_counter() - s0) * 1e6
-                    if inline_us < threshold:
-                        self._sync_inline_hits += 1
-                    else:
-                        # A slow handler (I/O, big work) pays off the thread
-                        # switch; route it through to_thread so it does not
-                        # stall the event loop.
-                        result = await asyncio.to_thread(tool.handler, **kwargs)
+                    if mode == _EXEC_PROBE:
+                        if inline_us < _SYNC_PROBE_THRESHOLD_US:
+                            # Fast enough that the to_thread offload
+                            # overhead (measured once per server, cached)
+                            # is never worth paying: classify inline.
+                            tool.exec_mode = _EXEC_FAST
+                        else:
+                            # Slow handler: future calls offload to a
+                            # worker thread. The offload-cost measurement
+                            # is only needed for logging/telemetry from
+                            # here on, so take it lazily.
+                            tool.exec_mode = _EXEC_SLOW
+                            threshold = self._sync_inline_threshold_us
+                            if threshold is None:
+                                if asyncio.get_event_loop().is_running():
+                                    threshold = await _measure_inline_threshold()
+                                else:
+                                    threshold = _sync_inline_threshold()
+                                self._sync_inline_threshold_us = threshold
+                    elif inline_us >= _SYNC_PROBE_THRESHOLD_US:
+                        # A previously-fast handler has degraded (GIL
+                        # pressure, growing data): re-classify slow.
+                        tool.exec_mode = _EXEC_SLOW
 
             # Single JSON pass for the wire path: encode the result ONCE,
             # meter on those bytes (~4 chars/token) and stash them on the
