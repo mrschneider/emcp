@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
@@ -142,6 +143,7 @@ class EmcpServer:
         allowed_capabilities: Capability = Capability.NONE,
         token_ledger_capacity: int = 1_000_000,
         verify_signatures: bool = False,
+        replay_cache_size: int = 10000,
     ):
         self.name = name
         self.identity = identity or ToolIdentity.generate()
@@ -162,6 +164,17 @@ class EmcpServer:
         # transports, enable and register each caller with register_identity.
         self.verify_signatures = verify_signatures
         self._caller_identities: Dict[int, ToolIdentity] = {}
+        # Replay / duplicate-transaction guard. A frame whose
+        # transaction_id was already processed is rejected before any
+        # handler runs, so a captured/re-sent frame (in-process or over a
+        # network transport) cannot re-execute a tool, double-count tokens,
+        # or double-apply a side effect. Bounded ring: _seen_ids is the
+        # membership set and _seen_order the FIFO eviction order — the same
+        # O(1) pattern used by the DTN custody store. Without the cap a
+        # long-running server would grow _seen_ids forever.
+        self._seen_tx_ids: set[int] = set()
+        self._seen_tx_order: deque[int] = deque()
+        self._replay_cache_size = replay_cache_size
         # Cached tools/list catalogue. list_tools() rebuilt the full
         # schema dict on every request — the hottest read path in a mesh
         # (every caller lists tools on connect and on reconnect).
@@ -170,6 +183,27 @@ class EmcpServer:
     def register_identity(self, identity: ToolIdentity) -> None:
         """Registers a caller identity so verify_signatures can check it."""
         self._caller_identities[identity.pin] = identity
+
+    def _mark_tx_seen(self, tx_id: int) -> None:
+        """Record a transaction_id as processed, evicting the oldest.
+
+        O(1): add to the membership set and the FIFO order deque; when the
+        set exceeds the cap, pop the oldest id from both views. The cap
+        bounds memory for a long-running server while still covering the
+        worst-case retransmit window.
+        """
+        self._seen_tx_ids.add(tx_id)
+        self._seen_tx_order.append(tx_id)
+        if len(self._seen_tx_ids) > self._replay_cache_size:
+            oldest = self._seen_tx_order.popleft()
+            self._seen_tx_ids.discard(oldest)
+
+    def _is_replay(self, tx_id: int) -> bool:
+        """Return True if tx_id was already processed in the window."""
+        if tx_id in self._seen_tx_ids:
+            return True
+        self._mark_tx_seen(tx_id)
+        return False
 
     @property
     def pin(self) -> int:
@@ -295,9 +329,28 @@ class EmcpServer:
                 },
             )
 
+        # 4. Replay / duplicate-transaction guard (fail-closed).
+        # Reject a frame whose transaction_id was already processed BEFORE
+        # the handler runs, so a captured or re-sent frame cannot
+        # re-execute a tool, double-apply a side effect, or double-count
+        # tokens. The escrow step below already refuses a duplicate tx_id,
+        # but only *after* the handler has run — this check short-circuits
+        # before that, which is the whole point for mutating tools. tx_id
+        # is caller-controlled (the client sets it), so a malicious client
+        # can always reuse an id; this bounds the damage to the replay
+        # window (bounded ring).
+        tx_id = frame.transaction_id
+        if self._is_replay(tx_id):
+            return frame.create_reply(
+                status=EmcpError.EMCP_ERR_REPLAY_DETECTED,
+                result_data={
+                    "error": f"Duplicate transaction_id 0x{tx_id:016X} rejected",
+                    "transaction_id": tx_id,
+                },
+            )
+
         # 4. Token Budget Escrow
         budget_limit = frame.constraints.token_budget or tool.default_max_tokens
-        tx_id = frame.transaction_id
         if not self.ledger.escrow(tx_id, budget_limit):
             return frame.create_reply(
                 status=EmcpError.EMCP_ERR_TOKEN_OVERFLOW,

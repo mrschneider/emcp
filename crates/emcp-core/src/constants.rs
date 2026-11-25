@@ -79,4 +79,5 @@ pub mod error_code {
     pub const EMCP_ERR_MALFORMED_FRAME: u32 = 9;
     pub const EMCP_ERR_TOOL_NOT_FOUND: u32 = 10;
     pub const EMCP_ERR_TOOL_EXECUTION_FAILED: u32 = 11;
+    pub const EMCP_ERR_REPLAY_DETECTED: u32 = 12;
 }
